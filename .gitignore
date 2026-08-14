@@ -1,0 +1,9 @@
+.env
+jarvis_history.sqlite3
+work/
+outputs/
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/

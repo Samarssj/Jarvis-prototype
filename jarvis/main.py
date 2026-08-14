@@ -1,0 +1,279 @@
+"""Jarvis entry point."""
+
+from __future__ import annotations
+
+import os
+
+# Set OpenMP thread limit prior to importing multithreaded libraries
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["CTRANSLATE2_INTER_THREADS"] = "1"
+
+import difflib
+import logging
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+
+from jarvis.brain import Brain
+from jarvis.config import settings
+from jarvis.memory import MemoryStore
+from jarvis.splash import get_running_port
+from jarvis.stt import SpeechToText
+from jarvis.tools.alarm import set_alarm
+from jarvis.tools.app_control import media_control, open_application, play_media, power_control
+from jarvis.tools.browser import open_website, play_youtube
+from jarvis.tools.file_manager import describe_file, find_file, open_file
+from jarvis.tools.reminder import set_reminder
+from jarvis.tools.system_info import get_system_info
+from jarvis.tools.time_tool import get_time
+from jarvis.tools.weather import get_weather
+from jarvis.tools.web_search import web_search
+from jarvis.tts import TextToSpeech
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+SPLASH_PORT = None
+
+# Common mishearings / natural variations of the wake word are matched too.
+WAKE_WORD_ALIASES = ["jarvis", "hey jarvis", "ok jarvis", "okay jarvis", "yo jarvis"]
+
+
+def get_greeting() -> str:
+    """Return a time-aware Jarvis greeting."""
+    hour = datetime.now().hour
+    if hour < 3:
+        return "Burning the midnight oil, sir? Jarvis is online — systems standing by, whenever you're ready."
+    if hour < 12:
+        return "Rise and shine, sir. Jarvis is online — all systems ready, right on schedule."
+    if hour < 17:
+        return "Good afternoon, sir. Jarvis is online — standing by, as always."
+    return "Evening, sir. Jarvis is online — let's make tonight interesting."
+
+
+def should_exit(user_text: str) -> bool:
+    """Detect whether the user wants Jarvis to stop listening."""
+    normalized = user_text.lower()
+    phrases = [
+        "turn yourself off",
+        "switch yourself off",
+        "shut yourself down",
+        "stop listening",
+        "i don't need anything else",
+        "i do not need anything else",
+        "that's all",
+        "thats all",
+        "goodbye jarvis",
+        "bye jarvis",
+        "sleep jarvis",
+        "turn off jarvis",
+    ]
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _is_wake_word_match(text: str, wake_word: str, threshold: float = 0.75) -> bool:
+    """Flexible match: exact/substring match, common aliases, or close fuzzy match
+    for mishearings (e.g. 'jarves', 'charvis', 'jarviss')."""
+    normalized = re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
+    wake_word = wake_word.lower().strip()
+
+    if not normalized:
+        return False
+
+    # 1) Direct substring match (covers "jarvis", "hey jarvis", etc. automatically)
+    if wake_word in normalized:
+        return True
+    for alias in WAKE_WORD_ALIASES:
+        if alias in normalized:
+            return True
+
+    # 2) Fuzzy match against each word in the transcription, to catch mishearings
+    for word in normalized.split():
+        ratio = difflib.SequenceMatcher(None, word, wake_word).ratio()
+        if ratio >= threshold:
+            return True
+
+    return False
+
+
+def wait_for_wake_word(stt: SpeechToText, wake_word: str) -> None:
+    """Block until the wake word (or a close variant/mishearing) is heard."""
+    wake_word = wake_word.lower().strip()
+    logger.info("Sleeping — say '%s' to wake me up.", wake_word)
+    while True:
+        splash_update("SLEEPING", f"Say '{wake_word}' to wake me", "off")
+        text = stt.listen_and_transcribe(seconds=4)  # short burst, cheap
+        if not text:
+            continue
+        logger.info("Heard while sleeping: %s", text)
+        if _is_wake_word_match(text, wake_word):
+            logger.info("Wake word detected: %s", text)
+            return
+
+
+def alarm_worker(memory: MemoryStore, tts: TextToSpeech, stop_event: threading.Event) -> None:
+    """Poll for due alarms and announce them."""
+    while not stop_event.is_set():
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for alarm in memory.get_due_alarms(now_iso):
+                memory.mark_alarm_triggered(alarm["id"])
+                message = f"Alarm time, sir. {alarm['text']}"
+                memory.add_message("assistant", message)
+                tts.speak_and_play(message)
+                logger.info("Triggered alarm: %s", alarm["text"])
+        except Exception:
+            logger.exception("Alarm worker error")
+        stop_event.wait(5)
+
+
+def splash_update(status: str, detail: str, mic: str) -> None:
+    """Fire-and-forget splash update — non-blocking so the main loop isn't
+    delayed waiting for a subprocess to spin up and exit."""
+    port = get_running_port()
+    if port is None:
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "jarvis.splash", "--set-status", status, "--set-detail", detail, "--mic", mic],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        logger.exception("Failed to update splash")
+
+
+def stop_splash() -> None:
+    """Tell the splash server to shut down."""
+    global SPLASH_PORT
+    if SPLASH_PORT is None:
+        return
+    try:
+        subprocess.run([sys.executable, "-m", "jarvis.splash", "--shutdown", str(SPLASH_PORT)], check=False)
+    finally:
+        SPLASH_PORT = None
+
+
+def _awaits_clarification(response_text: str) -> bool:
+    """Heuristic: if Jarvis's reply ends in a question, treat it as awaiting
+    a direct follow-up answer, rather than requiring the wake word again."""
+    return response_text.strip().endswith("?")
+
+
+def main() -> None:
+    splash_proc = subprocess.Popen([sys.executable, "-m", "jarvis.splash"])
+    for _ in range(20):
+        if get_running_port() is not None:
+            break
+        time.sleep(0.1)
+
+    stt: SpeechToText | None = None
+    try:
+        memory = MemoryStore(settings.db_path)
+        stt = SpeechToText(sample_rate=settings.sample_rate)
+        tts = TextToSpeech(voice=settings.tts_voice, rate=settings.tts_rate, pitch=settings.tts_pitch)
+        stop_event = threading.Event()
+
+        def remember_fact(key: str, value: str) -> str:
+            memory.set_fact(key, value)
+            return f"Got it, sir — I'll remember that {key.replace('_', ' ')} is {value}."
+
+        brain = Brain(
+            model_name=settings.model,
+            api_key=settings.gemini_api_key,
+            tools={
+                "get_weather": get_weather,
+                "web_search": web_search,
+                "open_application": open_application,
+                "play_media": play_media,
+                "media_control": media_control,
+                "power_control": power_control,
+                "get_system_info": get_system_info,
+                "set_reminder": lambda text, time: set_reminder(text, time, memory),
+                "set_alarm": lambda text, time: set_alarm(text, time, memory),
+                "get_time": get_time,
+                "open_website": open_website,
+                "play_youtube": play_youtube,
+                "find_file": find_file,
+                "open_file": open_file,
+                "remember_fact": remember_fact,
+                "describe_file": None,  # placeholder, replaced below once brain exists
+            },
+        )
+        # describe_file needs brain.describe_image for image content — wire it now that brain exists.
+        brain.tools["describe_file"] = lambda name: describe_file(name, brain.describe_image)
+
+        logger.info("Jarvis started")
+        threading.Thread(target=alarm_worker, args=(memory, tts, stop_event), daemon=True).start()
+        splash_update("LISTENING", "Awaiting your command, sir", "on")
+        tts.speak_and_play(get_greeting())
+
+        awaiting_clarification = False
+
+        while True:
+            try:
+                if not awaiting_clarification:
+                    wait_for_wake_word(stt, settings.wake_word)
+                    splash_update("LISTENING", "Yes, sir?", "on")
+                    tts.speak_and_play("Yes, sir?")
+                else:
+                    # Jarvis just asked a question — go straight to listening,
+                    # no wake word needed for this one follow-up.
+                    splash_update("LISTENING", "Listening for your answer...", "on")
+
+                user_text = stt.listen_and_transcribe(seconds=settings.record_seconds)
+                splash_update("LISTENING", "Listening...", "on")
+                if not user_text:
+                    logger.info("No speech detected")
+                    splash_update("LISTENING", "Awaiting your command, sir", "off")
+                    # If we were waiting on a clarification and got silence, don't
+                    # loop on it forever — fall back to requiring the wake word again.
+                    awaiting_clarification = False
+                    time.sleep(0.5)
+                    continue
+
+                logger.info("User said: %s", user_text)
+                if should_exit(user_text):
+                    memory.add_message("user", user_text)
+                    goodbye = "Very well, sir. Going offline."
+                    memory.add_message("assistant", goodbye)
+                    splash_update("SPEAKING", "Going offline", "off")
+                    tts.speak_and_play(goodbye)
+                    logger.info("Jarvis going offline on user request")
+                    stop_event.set()
+                    break
+
+                memory.add_message("user", user_text)
+                splash_update("THINKING", f'"{user_text}"', "off")
+                response = brain.generate(memory.get_recent_messages(), facts=memory.get_all_facts())
+                memory.add_message("assistant", response.text)
+                splash_update("SPEAKING", response.text[:60] + "..." if len(response.text) > 60 else response.text, "off")
+                tts.speak_and_play(response.text)
+
+                awaiting_clarification = _awaits_clarification(response.text)
+                if awaiting_clarification:
+                    logger.info("Awaiting clarification — skipping wake word on next turn.")
+                else:
+                    splash_update("LISTENING", "Awaiting your command, sir", "on")
+                logger.info("Responded with: %s", response.text)
+            except KeyboardInterrupt:
+                logger.info("Shutting down")
+                stop_event.set()
+                break
+            except Exception:
+                logger.exception("Unexpected error in main loop")
+                awaiting_clarification = False
+                splash_update("LISTENING", "Awaiting your command, sir", "on")
+    finally:
+        if stt is not None:
+            stt.close()
+        splash_update("SHUTTING DOWN", "Closing interface", "off")
+        stop_splash()
+        if splash_proc.poll() is None:
+            splash_proc.terminate()
+
+
+if __name__ == "__main__":
+    main()
