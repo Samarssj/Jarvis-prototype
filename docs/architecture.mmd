@@ -1,0 +1,41 @@
+flowchart LR
+    MIC[Microphone<br/>sounddevice] --> STREAM[Persistent audio stream]
+    STREAM --> VAD[VAD + RMS meter]
+    VAD --> STT[faster-whisper<br/>offline transcription]
+    STT --> WAKE[Wake-word + fuzzy intent layer]
+
+    WAKE -->|wake detected| BRAIN[Gemini Brain<br/>temperature 0.4]
+    WAKE -->|Mark 50 / Iron Man intent| HUD_ANIM[HUD animation trigger]
+    BRAIN -->|tool call| DISPATCH[Grounded tool dispatcher]
+    BRAIN -->|natural request| RESPONSE[Natural response]
+
+    DISPATCH --> WEB[Network tools<br/>weather + web search]
+    DISPATCH --> OS[OS tools<br/>apps + media + browser + files]
+    DISPATCH --> MEMORY[SQLite tools<br/>alarms + reminders + facts]
+    WEB --> CONTRACT[TOOL_OK / TOOL_ERROR / TOOL_RESULT]
+    OS --> CONTRACT
+    MEMORY --> CONTRACT
+    CONTRACT --> BRAIN_RESULT[Verified spoken result]
+    RESPONSE --> TTS[edge-tts]
+    BRAIN_RESULT --> TTS
+    TTS --> SPEAKER[Speaker output]
+
+    MEMORY --> WORKER[Background alarm/reminder worker]
+    WORKER -->|due item| SPEAKER
+
+    BRAIN -. latency .-> TELEMETRY[Cached telemetry]
+    STREAM -. audio level .-> TELEMETRY
+    TELEMETRY --> HUD[Threaded Tony Stark HUD<br/>splash.py]
+    HUD_ANIM --> HUD
+
+    classDef input fill:#071b2d,stroke:#31c7ff,color:#e9fbff;
+    classDef brain fill:#24124a,stroke:#b784ff,color:#fff;
+    classDef tool fill:#3a1d0b,stroke:#ffb347,color:#fff;
+    classDef output fill:#102d20,stroke:#54e38e,color:#effff4;
+    classDef hud fill:#1b193d,stroke:#ff4e70,color:#fff;
+
+    class MIC,STREAM,VAD,STT,WAKE input;
+    class BRAIN,DISPATCH,CONTRACT,BRAIN_RESULT brain;
+    class WEB,OS,MEMORY,WORKER tool;
+    class RESPONSE,TTS,SPEAKER output;
+    class HUD_ANIM,TELEMETRY,HUD hud;

@@ -1,0 +1,50 @@
+flowchart TD
+    START([Jarvis starts]) --> INIT[Initialize persistent mic stream,<br/>SQLite memory, TTS, and HUD]
+    INIT --> SLEEP[Sleep mode:<br/>short wake-word listening bursts]
+    SLEEP -->|no wake word| SLEEP
+    SLEEP -->|Jarvis or fuzzy match| ACK[Speak: Yes, sir?]
+    ACK --> CAPTURE[Capture command with VAD]
+    CAPTURE -->|silence / no speech| RECOVER[Speak recoverable status]
+    RECOVER --> SLEEP
+    CAPTURE --> COMMAND[Transcribed command]
+
+    COMMAND --> MARK{Mark 50 / Iron Man<br/>intent detected?}
+    MARK -->|yes| ASSEMBLY[Trigger non-blocking<br/>Mark 50 assembly HUD]
+    MARK -->|no| BRAIN[Send command to Gemini brain]
+    ASSEMBLY --> BRAIN
+
+    BRAIN -->|natural request| NATURAL[Generate natural J.A.R.V.I.S. response]
+    BRAIN -->|tool request| TOOL[Run selected tool]
+    TOOL --> VALIDATE{Verified result?}
+    VALIDATE -->|TOOL_OK| CONFIRM[Speak grounded confirmation]
+    VALIDATE -->|TOOL_RESULT| REPORT[Speak grounded observation]
+    VALIDATE -->|TOOL_ERROR| FAILURE[Speak explicit failure;<br/>never claim success]
+
+    NATURAL --> SPEAK[edge-tts + playback]
+    CONFIRM --> SPEAK
+    REPORT --> SPEAK
+    FAILURE --> SPEAK
+    SPEAK --> FOLLOWUP{Clarification question?}
+    FOLLOWUP -->|yes| DIRECT[Listen once without wake word]
+    FOLLOWUP -->|no| SLEEP
+    DIRECT --> CAPTURE
+
+    ALARM[(SQLite alarms/reminders)] --> WORKER[Background delivery worker]
+    WORKER --> DUE{Due item persisted?}
+    DUE -->|yes| ALERT[Speak alarm/reminder]
+    DUE -->|no| WORKER
+    ALERT --> WORKER
+
+    classDef state fill:#071b2d,stroke:#31c7ff,color:#e9fbff;
+    classDef decision fill:#2d1d08,stroke:#ffb347,color:#fff;
+    classDef action fill:#24124a,stroke:#b784ff,color:#fff;
+    classDef result fill:#102d20,stroke:#54e38e,color:#effff4;
+    classDef error fill:#3a1118,stroke:#ff5c7a,color:#fff;
+    classDef memory fill:#1b193d,stroke:#ff4e70,color:#fff;
+
+    class START,INIT,SLEEP,ACK,CAPTURE,COMMAND state;
+    class MARK,VALIDATE,FOLLOWUP,DUE decision;
+    class ASSEMBLY,BRAIN,TOOL,NATURAL,SPEAK,DIRECT,WORKER action;
+    class CONFIRM,REPORT,ALERT result;
+    class RECOVER,FAILURE error;
+    class ALARM memory;
