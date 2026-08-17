@@ -385,8 +385,13 @@ class Brain:
         included in `messages`.
         """
         if self.client is None:
-            last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-            return BrainResponse(text=f"Gemini API key is missing. I heard: {last_user}", tool_calls=[])
+            return BrainResponse(
+                text=(
+                    "Gemini API key is missing, sir. Add GEMINI_API_KEY to the .env file in this Jarvis project "
+                    "and restart me. No command was executed."
+                ),
+                tool_calls=[],
+            )
 
         tool_results: list[dict[str, Any]] = []
         working_messages = list(messages)

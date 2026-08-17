@@ -152,7 +152,7 @@ The optional `python-docx` and `pypdf` packages enable DOCX and PDF inspection t
 cp .env.example .env
 ```
 
-At minimum, set `GEMINI_API_KEY`. Set `OPENWEATHER_API_KEY` if you want weather lookups. The remaining variables tune speech, VAD, the HUD, model timeout, and SQLite storage.
+At minimum, set `GEMINI_API_KEY`. Set `OPENWEATHER_API_KEY` if you want weather lookups. The remaining variables tune speech, VAD, the HUD, model timeout, and SQLite storage. Jarvis also accepts `GOOGLE_API_KEY` as a compatibility alias, but `GEMINI_API_KEY` is the recommended name.
 
 ### 4. Run Jarvis
 
@@ -166,6 +166,16 @@ For a single text-driven request without the continuous microphone loop:
 python -m jarvis.run_once "what time is it"
 python -m jarvis.run_once "find my resume" --speak
 ```
+
+### If Jarvis says the Gemini API key is missing
+
+Make sure the `.env` file is inside the same project directory that contains the `jarvis/` folder. The file should contain a real key without placeholder brackets:
+
+```dotenv
+GEMINI_API_KEY=your_actual_gemini_key
+```
+
+Then restart Jarvis from that project directory. The loader now searches the project-root `.env`, preserves keys exported in the shell, and also recognizes `GOOGLE_API_KEY`. If no key is found, Jarvis speaks one actionable configuration message, does not open the microphone, does not claim to have processed the command, and exits cleanly instead of repeating the command and returning to sleep.
 
 ## Configuration reference
 

@@ -215,13 +215,24 @@ def main() -> None:
     stt: SpeechToText | None = None
     try:
         memory = MemoryStore(settings.db_path)
+        tts = TextToSpeech(voice=settings.tts_voice, rate=settings.tts_rate, pitch=settings.tts_pitch)
+
+        if not settings.gemini_api_key:
+            missing_key_message = (
+                "Gemini API key is missing, sir. Add GEMINI_API_KEY to the .env file in this Jarvis project, "
+                "then restart me. I have not opened the microphone or processed the command."
+            )
+            logger.error("Gemini API key is missing; refusing to start the voice loop")
+            splash_update("CONFIGURATION ERROR", "Gemini API key missing", "off")
+            tts.speak_and_play(missing_key_message)
+            return
+
         stt = SpeechToText(
             model_size=settings.stt_model,
             sample_rate=settings.sample_rate,
             silence_limit=settings.vad_silence_limit,
             no_speech_timeout=settings.vad_no_speech_timeout,
         )
-        tts = TextToSpeech(voice=settings.tts_voice, rate=settings.tts_rate, pitch=settings.tts_pitch)
         speech_lock = threading.Lock()
         stop_event = threading.Event()
 
