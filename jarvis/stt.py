@@ -222,22 +222,40 @@ class SpeechToText:
     def record_audio(self, seconds: int = 11) -> Path:
         return self.record_audio_vad(max_seconds=float(seconds))
 
-    def transcribe_file(self, audio_path: Path) -> str:
+    def transcribe_file(self, audio_path: Path, initial_prompt: str | None = None) -> str:
         """Transcribe an existing wav file with single-threaded greedy decoding."""
         logger.info("Transcribing audio file...")
-        segments, _info = self.model.transcribe(str(audio_path), language="en", beam_size=1)
+        options = {
+            "language": "en",
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+            "vad_filter": True,
+        }
+        if initial_prompt:
+            options["initial_prompt"] = initial_prompt
+        segments, _info = self.model.transcribe(str(audio_path), **options)
         text = "".join(segment.text for segment in segments).strip()
         logger.info("Transcription result: %s", text)
         return text
 
-    def listen_and_transcribe(self, seconds: int = 11) -> str:
+    def listen_and_transcribe(
+        self,
+        seconds: int = 11,
+        silence_limit: float | None = None,
+        no_speech_timeout: float | None = None,
+        initial_prompt: str | None = None,
+    ) -> str:
         """Record audio and return the transcribed text with stage timing logs."""
         started = time.perf_counter()
-        wav_path = self.record_audio(seconds=seconds)
+        wav_path = self.record_audio_vad(
+            max_seconds=float(seconds),
+            silence_limit=silence_limit,
+            no_speech_timeout=no_speech_timeout,
+        )
         recorded_ms = (time.perf_counter() - started) * 1000
         try:
             transcribe_started = time.perf_counter()
-            text = self.transcribe_file(wav_path)
+            text = self.transcribe_file(wav_path, initial_prompt=initial_prompt)
             transcribed_ms = (time.perf_counter() - transcribe_started) * 1000
             logger.info("Voice pipeline timing: capture=%.0fms transcription=%.0fms", recorded_ms, transcribed_ms)
             return text

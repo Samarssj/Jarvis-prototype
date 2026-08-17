@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,42 @@ class FileManagerMatchingTests(unittest.TestCase):
 
             self.assertIn("TOOL_ERROR", result)
             self.assertIn("No file matching", result)
+
+    def test_open_file_confirms_macos_launcher_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "Samar_ATS_Resume.pdf"
+            target.write_bytes(b"resume")
+
+            with (
+                patch.object(file_manager, "SAFE_ROOTS", [root]),
+                patch.object(file_manager.sys, "platform", "darwin"),
+                patch.object(file_manager.subprocess, "run") as run,
+            ):
+                result = file_manager.open_file("summer ats resume")
+
+            run.assert_called_once_with(["open", str(target)], check=True)
+            self.assertIn("TOOL_OK", result)
+
+    def test_open_file_reports_macos_launcher_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "Samar_ATS_Resume.pdf"
+            target.write_bytes(b"resume")
+
+            with (
+                patch.object(file_manager, "SAFE_ROOTS", [root]),
+                patch.object(file_manager.sys, "platform", "darwin"),
+                patch.object(
+                    file_manager.subprocess,
+                    "run",
+                    side_effect=subprocess.SubprocessError("launcher failed"),
+                ),
+            ):
+                result = file_manager.open_file("summer ats resume")
+
+            self.assertIn("TOOL_ERROR", result)
+            self.assertIn(target.name, result)
 
     def test_multiple_candidates_are_returned_in_ranked_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -32,14 +32,12 @@ from jarvis.tools.time_tool import get_time
 from jarvis.tools.weather import get_weather
 from jarvis.tools.web_search import web_search
 from jarvis.tts import TextToSpeech
+from jarvis.wake import is_wake_word_match
+from jarvis.local_commands import extract_file_command, run_file_command
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 SPLASH_PORT = None
-
-# Common mishearings / natural variations of the wake word are matched too.
-WAKE_WORD_ALIASES = ["jarvis", "hey jarvis", "ok jarvis", "okay jarvis", "yo jarvis"]
-
 
 def get_greeting() -> str:
     """Return a time-aware Jarvis greeting."""
@@ -89,29 +87,9 @@ def should_exit(user_text: str) -> bool:
     return any(phrase in normalized for phrase in phrases)
 
 
-def _is_wake_word_match(text: str, wake_word: str, threshold: float = 0.75) -> bool:
-    """Flexible match: exact/substring match, common aliases, or close fuzzy match
-    for mishearings (e.g. 'jarves', 'charvis', 'jarviss')."""
-    normalized = re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
-    wake_word = wake_word.lower().strip()
-
-    if not normalized:
-        return False
-
-    # 1) Direct substring match (covers "jarvis", "hey jarvis", etc. automatically)
-    if wake_word in normalized:
-        return True
-    for alias in WAKE_WORD_ALIASES:
-        if alias in normalized:
-            return True
-
-    # 2) Fuzzy match against each word in the transcription, to catch mishearings
-    for word in normalized.split():
-        ratio = difflib.SequenceMatcher(None, word, wake_word).ratio()
-        if ratio >= threshold:
-            return True
-
-    return False
+def _is_wake_word_match(text: str, wake_word: str, threshold: float = 0.74) -> bool:
+    """Match Jarvis wake-word variants without unrestricted fuzzy false positives."""
+    return is_wake_word_match(text, wake_word=wake_word, threshold=threshold)
 
 
 def wait_for_wake_word(stt: SpeechToText, wake_word: str) -> None:
@@ -120,7 +98,12 @@ def wait_for_wake_word(stt: SpeechToText, wake_word: str) -> None:
     logger.info("Sleeping — say '%s' to wake me up.", wake_word)
     while True:
         splash_update("SLEEPING", f"Say '{wake_word}' to wake me", "off")
-        text = stt.listen_and_transcribe(seconds=4)  # short burst, cheap
+        text = stt.listen_and_transcribe(
+            seconds=3,
+            silence_limit=0.65,
+            no_speech_timeout=1.2,
+            initial_prompt="Hey Jarvis. Jarvis.",
+        )
         if not text:
             continue
         logger.info("Heard while sleeping: %s", text)
@@ -317,6 +300,17 @@ def main() -> None:
                     break
 
                 memory.add_message("user", user_text)
+                direct_file_command = extract_file_command(user_text)
+                if direct_file_command:
+                    action, name = direct_file_command
+                    logger.info("Handling file command locally: action=%s name=%s", action, name)
+                    response_text = run_file_command(action, name)
+                    memory.add_message("assistant", response_text)
+                    splash_update("SPEAKING", response_text[:60] + "..." if len(response_text) > 60 else response_text, "off")
+                    speak(response_text)
+                    awaiting_clarification = response_text.strip().endswith("?")
+                    continue
+
                 splash_update("THINKING", f'"{user_text}"', "off")
                 if wants_suit_assembly(user_text):
                     splash_set_animation("mark50_assembly")

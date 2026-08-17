@@ -442,9 +442,27 @@ class Brain:
                 if "429" in message or "Too Many Requests" in message:
                     return BrainResponse(
                         text="Gemini is busy right now, sir. I’ll keep running locally and try again shortly.",
-                        tool_calls=[],
+                        tool_calls=tool_results,
                     )
-                raise
+                logger.warning("Gemini request failed: %s", message)
+                return BrainResponse(
+                    text=(
+                        "Gemini is temporarily unavailable, sir. I could not safely run that request. "
+                        "Local file commands remain available."
+                    ),
+                    tool_calls=tool_results,
+                )
+            except Exception as exc:
+                # google-genai raises ServerError/APIError variants for 5xx
+                # responses; keep the voice loop alive and never claim a tool ran.
+                logger.warning("Gemini provider error: %s", exc)
+                return BrainResponse(
+                    text=(
+                        "Gemini is temporarily unavailable, sir. I could not safely run that request. "
+                        "Local file commands remain available."
+                    ),
+                    tool_calls=tool_results,
+                )
             tool_calls = self._extract_function_calls(response)
             if not tool_calls:
                 text = self._extract_text(response)

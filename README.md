@@ -232,6 +232,8 @@ jarvis/
 ├── memory.py           SQLite history, facts, alarms, and reminders
 ├── splash.py           Threaded HUD server, telemetry, and animations
 ├── stt.py              Persistent microphone stream, VAD, and transcription
+├── wake.py             Wake-word normalization and speech-recognition variants
+├── local_commands.py   Gemini-independent local file command shortcuts
 ├── tts.py              Edge TTS synthesis and playback
 └── tools/
     ├── alarm.py
