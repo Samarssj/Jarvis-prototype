@@ -42,7 +42,9 @@ class MemoryStore:
                     time TEXT NOT NULL,
                     delivered INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
-                    delivered_at TEXT
+                    delivered_at TEXT,
+                    native_calendar_id TEXT,
+                    native_reminder_id TEXT
                 )
                 """
                 )
@@ -51,6 +53,10 @@ class MemoryStore:
                     conn.execute("ALTER TABLE reminders ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
                 if "delivered_at" not in reminder_columns:
                     conn.execute("ALTER TABLE reminders ADD COLUMN delivered_at TEXT")
+                if "native_calendar_id" not in reminder_columns:
+                    conn.execute("ALTER TABLE reminders ADD COLUMN native_calendar_id TEXT")
+                if "native_reminder_id" not in reminder_columns:
+                    conn.execute("ALTER TABLE reminders ADD COLUMN native_reminder_id TEXT")
                 conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alarms (
@@ -59,10 +65,14 @@ class MemoryStore:
                     time TEXT NOT NULL,
                     triggered INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
-                    triggered_at TEXT
+                    triggered_at TEXT,
+                    native_calendar_id TEXT
                 )
                 """
                 )
+                alarm_columns = {row[1] for row in conn.execute("PRAGMA table_info(alarms)").fetchall()}
+                if "native_calendar_id" not in alarm_columns:
+                    conn.execute("ALTER TABLE alarms ADD COLUMN native_calendar_id TEXT")
                 conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_facts (
@@ -90,12 +100,28 @@ class MemoryStore:
                 ).fetchall()
         return [{"role": role, "content": content} for role, content in reversed(rows)]
 
-    def add_reminder(self, text: str, when: str) -> int:
+    def add_reminder(
+        self,
+        text: str,
+        when: str,
+        native_calendar_id: str | None = None,
+        native_reminder_id: str | None = None,
+    ) -> int:
         with self._lock:
             with self._connect() as conn:
                 cursor = conn.execute(
-                "INSERT INTO reminders(text, time, delivered, created_at) VALUES (?, ?, 0, ?)",
-                (text, when, datetime.now(timezone.utc).isoformat()),
+                """
+                INSERT INTO reminders(
+                    text, time, delivered, created_at, native_calendar_id, native_reminder_id
+                ) VALUES (?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    text,
+                    when,
+                    datetime.now(timezone.utc).isoformat(),
+                    native_calendar_id,
+                    native_reminder_id,
+                ),
                 )
                 return int(cursor.lastrowid)
 
@@ -107,12 +133,15 @@ class MemoryStore:
                 ).fetchall()
         return [{"text": text, "time": when} for text, when in rows]
 
-    def add_alarm(self, text: str, when: str) -> int:
+    def add_alarm(self, text: str, when: str, native_calendar_id: str | None = None) -> int:
         with self._lock:
             with self._connect() as conn:
                 cursor = conn.execute(
-                "INSERT INTO alarms(text, time, triggered, created_at) VALUES (?, ?, 0, ?)",
-                (text, when, datetime.now(timezone.utc).isoformat()),
+                """
+                INSERT INTO alarms(text, time, triggered, created_at, native_calendar_id)
+                VALUES (?, ?, 0, ?, ?)
+                """,
+                (text, when, datetime.now(timezone.utc).isoformat(), native_calendar_id),
                 )
                 return int(cursor.lastrowid)
 
@@ -121,14 +150,38 @@ class MemoryStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT id, text, time
+                    SELECT id, text, time, native_calendar_id, native_reminder_id
                     FROM reminders
-                    WHERE delivered = 0 AND time <= ?
+                    WHERE delivered = 0
+                      AND native_calendar_id IS NULL
+                      AND native_reminder_id IS NULL
+                      AND time <= ?
                     ORDER BY time ASC
                     """,
                     (now_iso,),
                 ).fetchall()
-        return [{"id": reminder_id, "text": text, "time": when} for reminder_id, text, when in rows]
+        return [
+            {
+                "id": reminder_id,
+                "text": text,
+                "time": when,
+                "native_calendar_id": native_calendar_id,
+                "native_reminder_id": native_reminder_id,
+            }
+            for reminder_id, text, when, native_calendar_id, native_reminder_id in rows
+        ]
+
+    def attach_native_reminder(self, reminder_id: int, calendar_id: str, reminder_native_id: str) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE reminders
+                    SET native_calendar_id = ?, native_reminder_id = ?
+                    WHERE id = ?
+                    """,
+                    (calendar_id, reminder_native_id, reminder_id),
+                )
 
     def mark_reminder_delivered(self, reminder_id: int) -> None:
         with self._lock:
@@ -147,14 +200,34 @@ class MemoryStore:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT id, text, time
+                    SELECT id, text, time, native_calendar_id
                     FROM alarms
-                    WHERE triggered = 0 AND time <= ?
+                    WHERE triggered = 0 AND native_calendar_id IS NULL AND time <= ?
                     ORDER BY time ASC
                     """,
                     (now_iso,),
                 ).fetchall()
-        return [{"id": alarm_id, "text": text, "time": when} for alarm_id, text, when in rows]
+        return [
+            {
+                "id": alarm_id,
+                "text": text,
+                "time": when,
+                "native_calendar_id": native_calendar_id,
+            }
+            for alarm_id, text, when, native_calendar_id in rows
+        ]
+
+    def attach_native_alarm(self, alarm_id: int, calendar_id: str) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE alarms
+                    SET native_calendar_id = ?
+                    WHERE id = ?
+                    """,
+                    (calendar_id, alarm_id),
+                )
 
     def mark_alarm_triggered(self, alarm_id: int) -> None:
         with self._lock:

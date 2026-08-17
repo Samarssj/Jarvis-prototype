@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from jarvis.memory import MemoryStore
+from jarvis.tools.native_schedule import NativeScheduleError, create_native_alarm
 
 
 def _local_now() -> datetime:
@@ -72,13 +73,26 @@ def format_scheduled_time(iso_time: str) -> str:
 
 
 def set_alarm(text: str, time: str, memory: MemoryStore) -> str:
-    """Persist an alarm and return only a verified success or failure result."""
+    """Persist an alarm and create a native macOS Calendar sound alarm."""
+    text = text.strip()
+    if not text:
+        return "TOOL_ERROR: Alarm text cannot be empty."
     try:
         iso_time = parse_scheduled_time(time)
         alarm_id = memory.add_alarm(text=text, when=iso_time)
+        try:
+            native = create_native_alarm(text, iso_time)
+        except NativeScheduleError as exc:
+            return (
+                f"TOOL_ERROR: Alarm #{alarm_id} was saved locally, but the native macOS Calendar alarm was not created: {exc}."
+            )
+        if not native.calendar_event_id:
+            return f"TOOL_ERROR: Alarm #{alarm_id} was saved locally, but macOS returned no Calendar event identifier."
+        memory.attach_native_alarm(alarm_id, native.calendar_event_id)
         return (
-            f"TOOL_OK: Alarm #{alarm_id} was persisted and is scheduled for "
-            f"{format_scheduled_time(iso_time)} ({iso_time}). Message: {text}"
+            f"TOOL_OK: Alarm #{alarm_id} was created in macOS Calendar with a native sound alert and persisted locally. "
+            f"Calendar ID {native.calendar_event_id}. Scheduled for {format_scheduled_time(iso_time)} ({iso_time}). "
+            f"Message: {text}"
         )
     except Exception as exc:
         return f"TOOL_ERROR: Alarm was not scheduled because {exc}."

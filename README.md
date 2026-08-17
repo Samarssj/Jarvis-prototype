@@ -88,7 +88,9 @@ The microphone stream remains open for the lifetime of the process. Voice activi
 
 ### Persistent alarms and reminders
 
-Alarms and reminders are written to SQLite before Jarvis acknowledges them. Each scheduling tool returns a confirmed database row ID, rejects invalid times, and uses a background worker to retrieve and mark due items. If persistence fails, Jarvis speaks an explicit failure instead of a success-like response.
+Alarms and reminders are written to SQLite before Jarvis acknowledges them. Each scheduling tool rejects invalid times and returns the local row ID plus the native macOS identifiers. If native automation fails, Jarvis reports the failure honestly and keeps a local fallback record instead of pretending that a Calendar or Reminders entry exists.
+
+On macOS, `set_alarm` creates a Calendar event with a native sound alert, and `set_reminder` creates both a Calendar alert and an item in the Reminders app. These native entries are owned by macOS, so they continue to exist and notify after Jarvis is restarted or closed. The SQLite worker delivers only records that do not have a verified native entry, preventing duplicate notifications while preserving a recovery path for permission or automation failures.
 
 ## Tool catalog
 
@@ -101,8 +103,8 @@ Alarms and reminders are written to SQLite before Jarvis acknowledges them. Each
 | `media_control(action)` | Play, pause, next, or previous. | Reports unsupported platforms, inactive players, and AppleScript failures. |
 | `power_control(action, confirm)` | Request macOS shutdown or restart. | Requires the exact confirmation token `confirm` and reports OS rejection. |
 | `get_system_info(category)` | CPU thermal status, RAM, battery, and disk diagnostics. | Validates category and propagates unsupported-platform or component errors. |
-| `set_alarm(text, time)` | Persist an alarm in SQLite and speak it when due. | Returns a verified row ID or `TOOL_ERROR`. |
-| `set_reminder(text, time)` | Persist a reminder in SQLite and deliver it when due. | Returns a verified row ID or `TOOL_ERROR`. |
+| `set_alarm(text, time)` | Create a macOS Calendar event with a native sound alert and persist a local record. | Verifies the Calendar event identifier and returns `TOOL_ERROR` if native creation fails. |
+| `set_reminder(text, time)` | Create a macOS Calendar alert, a Reminders item, and a local persistent record. | Verifies both native identifiers and returns `TOOL_ERROR` if either native entry is not confirmed. |
 | `get_time()` | Read local wall-clock time. | Returns a timestamp with an explicit success contract. |
 | `open_website(url)` | Open an HTTP or HTTPS URL in the default browser. | Validates the URL and checks launcher failure. |
 | `play_youtube(query)` | Find and open a YouTube result. | Reports direct-result opening or verified search-page fallback. |
@@ -196,6 +198,8 @@ Then restart Jarvis from that project directory. The loader now searches the pro
 | `JARVIS_TTS_PITCH` | `-2Hz` | Speech pitch adjustment. |
 | `JARVIS_SPLASH_DURATION_MS` | `3500` | HUD startup animation duration. |
 | `JARVIS_DB_PATH` | `jarvis_history.sqlite3` | SQLite database path. |
+| `JARVIS_NATIVE_CALENDAR` | `Jarvis` | macOS Calendar name used for native alarms and reminder alerts. |
+| `JARVIS_NATIVE_REMINDERS_LIST` | `Jarvis` | macOS Reminders list used for native reminder items. |
 
 ## Memory and scheduling
 
@@ -216,6 +220,8 @@ Invalid or ambiguous times are rejected instead of being silently normalized int
 
 File search is limited to `Documents`, `Desktop`, and `Downloads`; it does not crawl the full home directory or system paths. Power control requires an exact confirmation token and administrator authorization from macOS. Media, browser, and system-diagnostics integrations return explicit unsupported-platform errors when the host cannot perform them.
 
+The first native scheduling request may prompt macOS for Automation access. Allow the Python host or Terminal to control **Calendar** and **Reminders** in **System Settings → Privacy & Security → Automation**. If access is denied, Jarvis returns `TOOL_ERROR` and retains the local SQLite fallback record instead of claiming that a native entry was created.
+
 ## Project structure
 
 ```text
@@ -230,6 +236,7 @@ jarvis/
 └── tools/
     ├── alarm.py
     ├── reminder.py
+    ├── native_schedule.py Native Calendar and Reminders AppleScript bridge
     ├── weather.py
     ├── web_search.py
     ├── app_control.py
@@ -262,6 +269,9 @@ ALL_TOOLS_GROUNDING=PASS
 2. [GitHub: Creating Mermaid diagrams](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-diagrams) — Mermaid diagrams in GitHub Markdown.
 3. [Google Gemini API documentation](https://ai.google.dev/) — model and SDK reference.
 4. [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — local speech-to-text engine.
+5. [Apple Calendar Scripting Guide: Creating an Event](https://developer.apple.com/library/archive/documentation/AppleApplications/Conceptual/CalendarScriptingGuide/Calendar-CreateanEvent.html) — native Calendar event creation.
+6. [Apple Calendar Scripting Guide: Adding an Alarm to an Event](https://developer.apple.com/library/archive/documentation/AppleApplications/Conceptual/CalendarScriptingGuide/Calendar-AddanAlarmtoanEvent.html) — native Calendar sound and display alarms.
+7. [Reminders AppleScript reference](https://www.macscripter.net/t/reminders-app/64407) — native Reminders creation with a reminder date.
 
 ## Roadmap
 
