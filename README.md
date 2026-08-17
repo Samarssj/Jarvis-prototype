@@ -29,10 +29,14 @@ Required keys and settings:
 * `OPENWEATHER_API_KEY` for weather lookups
 * `JARVIS_WAKE_WORD` — word Jarvis listens for while idle (default: `jarvis`)
 * `JARVIS_MODEL`
+* `JARVIS_MODEL_TIMEOUT_MS` — maximum time allowed for one model request before Jarvis returns to a recoverable listening state.
 * `JARVIS_TTS_VOICE`
 * `JARVIS_TTS_RATE`
 * `JARVIS_TTS_PITCH`
 * `JARVIS_SAMPLE_RATE`
+* `JARVIS_STT_MODEL` — Whisper model used for local transcription; `tiny.en` is the low-latency default and can be changed to `base.en` for higher accuracy.
+* `JARVIS_VAD_SILENCE_LIMIT` — seconds of silence after speech before recording stops.
+* `JARVIS_VAD_NO_SPEECH_TIMEOUT` — maximum initial wait for speech before returning to the wake-word loop.
 * `JARVIS_RECORD_SECONDS` — max length of a single command recording
 * `JARVIS_SPLASH_DURATION_MS`
 * `JARVIS_DB_PATH`
@@ -50,7 +54,7 @@ Jarvis runs a continuous loop with two listening modes:
 * **Idle / wake-word mode** — short 4-second bursts, checking for "Jarvis" (or close mishearings like "jarves," "charvis," and natural variants like "hey Jarvis," "ok Jarvis"). Fuzzy matching handles imperfect transcriptions so you don't need to say the word with perfect clarity.
 * **Command mode** — once woken, Jarvis replies "Yes, sir?" and listens for your actual request using Voice Activity Detection: it starts recording when it hears speech, and stops automatically after ~2 seconds of silence, up to a `JARVIS_RECORD_SECONDS` hard ceiling.
 
-A single persistent microphone stream is kept open for the lifetime of the app, rather than reopening the mic for every recording — this avoids flaky hangs that can occur from rapid stream open/close cycles on macOS.
+A single persistent microphone stream is kept open for the lifetime of the app, rather than reopening the mic for every recording — this avoids flaky hangs that can occur from rapid stream open/close cycles on macOS. The VAD reads short 40 ms chunks, ends quickly after silence, and publishes microphone intensity through a coalescing background writer so HUD telemetry never blocks audio capture.
 
 If Jarvis asks a follow-up/clarifying question (e.g. disambiguating between two similarly named files), it skips the wake-word requirement for your next reply — you can just answer directly.
 

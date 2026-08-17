@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from jarvis.brain import Brain
 from jarvis.config import settings
 from jarvis.memory import MemoryStore
-from jarvis.splash import get_running_port
+from jarvis.splash import get_running_port, set_state
 from jarvis.stt import SpeechToText
 from jarvis.tools.alarm import set_alarm
 from jarvis.tools.app_control import media_control, open_application, play_media, power_control
@@ -51,6 +51,22 @@ def get_greeting() -> str:
     if hour < 17:
         return "Good afternoon, sir. Jarvis is online — standing by, as always."
     return "Evening, sir. Jarvis is online — let's make tonight interesting."
+
+
+def wants_suit_assembly(user_text: str) -> bool:
+    """Fuzzy-match Mark 50 / Iron Man suit intent without requiring a command phrase."""
+    normalized = re.sub(r"[^a-z0-9\s]", "", user_text.lower())
+    normalized = re.sub(r"\b(fifty|fivty|fiifty)\s*(zero|0)\b", "50", normalized)
+    tokens = normalized.split()
+
+    def close_to(token: str, candidates: tuple[str, ...], threshold: float = 0.78) -> bool:
+        return any(difflib.SequenceMatcher(None, token, candidate).ratio() >= threshold for candidate in candidates)
+
+    has_mark = any(close_to(token, ("mark", "mk")) for token in tokens)
+    has_50 = "50" in tokens or any(token in {"fiftyzero", "fivtyzero"} for token in tokens)
+    has_suit = any(close_to(token, ("suit", "suite", "armor", "armour", "assembly")) for token in tokens)
+    has_iron_theme = any(close_to(token, ("iron", "ironman", "stark", "reactor")) for token in tokens)
+    return (has_mark and has_50) or (has_iron_theme and has_suit)
 
 
 def should_exit(user_text: str) -> bool:
@@ -113,45 +129,72 @@ def wait_for_wake_word(stt: SpeechToText, wake_word: str) -> None:
             return
 
 
-def alarm_worker(memory: MemoryStore, tts: TextToSpeech, stop_event: threading.Event) -> None:
-    """Poll for due alarms and announce them."""
+def alarm_worker(memory: MemoryStore, tts: TextToSpeech, stop_event: threading.Event, speech_lock: threading.Lock) -> None:
+    """Poll for due alarms and reminders and announce only persisted due items."""
     while not stop_event.is_set():
         try:
             now_iso = datetime.now(timezone.utc).isoformat()
             for alarm in memory.get_due_alarms(now_iso):
-                memory.mark_alarm_triggered(alarm["id"])
                 message = f"Alarm time, sir. {alarm['text']}"
+                with speech_lock:
+                    tts.speak_and_play(message)
+                memory.mark_alarm_triggered(alarm["id"])
                 memory.add_message("assistant", message)
-                tts.speak_and_play(message)
-                logger.info("Triggered alarm: %s", alarm["text"])
+                logger.info("Triggered persisted alarm #%s: %s", alarm["id"], alarm["text"])
+            for reminder in memory.get_due_reminders(now_iso):
+                message = f"Reminder, sir. {reminder['text']}"
+                with speech_lock:
+                    tts.speak_and_play(message)
+                memory.mark_reminder_delivered(reminder["id"])
+                memory.add_message("assistant", message)
+                logger.info("Delivered persisted reminder #%s: %s", reminder["id"], reminder["text"])
         except Exception:
-            logger.exception("Alarm worker error")
+            logger.exception("Alarm/reminder worker error")
         stop_event.wait(5)
 
 
 def splash_update(status: str, detail: str, mic: str) -> None:
-    """Fire-and-forget splash update — non-blocking so the main loop isn't
-    delayed waiting for a subprocess to spin up and exit."""
-    port = get_running_port()
-    if port is None:
+    """Publish HUD state directly; the server reads the shared state file."""
+    if get_running_port() is None:
         return
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", "jarvis.splash", "--set-status", status, "--set-detail", detail, "--mic", mic],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        set_state(status=status, detail=detail, mic=mic)
     except Exception:
         logger.exception("Failed to update splash")
 
 
-def stop_splash() -> None:
-    """Tell the splash server to shut down."""
-    global SPLASH_PORT
-    if SPLASH_PORT is None:
+def splash_set_animation(animation: str) -> None:
+    """Trigger a visual HUD animation without blocking voice processing."""
+    if get_running_port() is None:
         return
     try:
-        subprocess.run([sys.executable, "-m", "jarvis.splash", "--shutdown", str(SPLASH_PORT)], check=False)
+        set_state(animation=animation)
+        if animation == "mark50_assembly":
+            threading.Timer(14.5, lambda: set_state(animation="none")).start()
+    except Exception:
+        logger.exception("Failed to update splash animation")
+
+
+def splash_set_latency(latency_ms: int) -> None:
+    """Publish the latest measured model response latency to the HUD."""
+    if get_running_port() is None:
+        return
+    try:
+        set_state(latency_ms=latency_ms)
+    except Exception:
+        logger.exception("Failed to update splash latency")
+
+
+def stop_splash() -> None:
+    """Tell the splash server to shut down and clear its port marker."""
+    global SPLASH_PORT
+    port = SPLASH_PORT or get_running_port()
+    if port is None:
+        return
+    try:
+        subprocess.run([sys.executable, "-m", "jarvis.splash", "--shutdown", str(port)], check=False, timeout=3)
+    except subprocess.TimeoutExpired:
+        logger.warning("Splash shutdown timed out; continuing main process shutdown")
     finally:
         SPLASH_PORT = None
 
@@ -172,17 +215,35 @@ def main() -> None:
     stt: SpeechToText | None = None
     try:
         memory = MemoryStore(settings.db_path)
-        stt = SpeechToText(sample_rate=settings.sample_rate)
+        stt = SpeechToText(
+            model_size=settings.stt_model,
+            sample_rate=settings.sample_rate,
+            silence_limit=settings.vad_silence_limit,
+            no_speech_timeout=settings.vad_no_speech_timeout,
+        )
         tts = TextToSpeech(voice=settings.tts_voice, rate=settings.tts_rate, pitch=settings.tts_pitch)
+        speech_lock = threading.Lock()
         stop_event = threading.Event()
 
+        def speak(text: str) -> None:
+            with speech_lock:
+                tts.speak_and_play(text)
+
         def remember_fact(key: str, value: str) -> str:
-            memory.set_fact(key, value)
-            return f"Got it, sir — I'll remember that {key.replace('_', ' ')} is {value}."
+            key = key.strip()
+            value = value.strip()
+            if not key or not value:
+                return "TOOL_ERROR: Both a fact key and value are required."
+            try:
+                memory.set_fact(key, value)
+                return f"TOOL_OK: Remembered that {key.replace('_', ' ')} is {value}."
+            except Exception as exc:
+                return f"TOOL_ERROR: Could not remember that fact: {exc}."
 
         brain = Brain(
             model_name=settings.model,
             api_key=settings.gemini_api_key,
+            timeout_ms=settings.model_timeout_ms,
             tools={
                 "get_weather": get_weather,
                 "web_search": web_search,
@@ -206,9 +267,9 @@ def main() -> None:
         brain.tools["describe_file"] = lambda name: describe_file(name, brain.describe_image)
 
         logger.info("Jarvis started")
-        threading.Thread(target=alarm_worker, args=(memory, tts, stop_event), daemon=True).start()
+        threading.Thread(target=alarm_worker, args=(memory, tts, stop_event, speech_lock), daemon=True).start()
         splash_update("LISTENING", "Awaiting your command, sir", "on")
-        tts.speak_and_play(get_greeting())
+        speak(get_greeting())
 
         awaiting_clarification = False
 
@@ -217,7 +278,7 @@ def main() -> None:
                 if not awaiting_clarification:
                     wait_for_wake_word(stt, settings.wake_word)
                     splash_update("LISTENING", "Yes, sir?", "on")
-                    tts.speak_and_play("Yes, sir?")
+                    speak("Yes, sir?")
                 else:
                     # Jarvis just asked a question — go straight to listening,
                     # no wake word needed for this one follow-up.
@@ -231,7 +292,6 @@ def main() -> None:
                     # If we were waiting on a clarification and got silence, don't
                     # loop on it forever — fall back to requiring the wake word again.
                     awaiting_clarification = False
-                    time.sleep(0.5)
                     continue
 
                 logger.info("User said: %s", user_text)
@@ -240,17 +300,21 @@ def main() -> None:
                     goodbye = "Very well, sir. Going offline."
                     memory.add_message("assistant", goodbye)
                     splash_update("SPEAKING", "Going offline", "off")
-                    tts.speak_and_play(goodbye)
+                    speak(goodbye)
                     logger.info("Jarvis going offline on user request")
                     stop_event.set()
                     break
 
                 memory.add_message("user", user_text)
                 splash_update("THINKING", f'"{user_text}"', "off")
+                if wants_suit_assembly(user_text):
+                    splash_set_animation("mark50_assembly")
+                started = time.perf_counter()
                 response = brain.generate(memory.get_recent_messages(), facts=memory.get_all_facts())
+                splash_set_latency(max(1, round((time.perf_counter() - started) * 1000)))
                 memory.add_message("assistant", response.text)
                 splash_update("SPEAKING", response.text[:60] + "..." if len(response.text) > 60 else response.text, "off")
-                tts.speak_and_play(response.text)
+                speak(response.text)
 
                 awaiting_clarification = _awaits_clarification(response.text)
                 if awaiting_clarification:
@@ -265,6 +329,12 @@ def main() -> None:
             except Exception:
                 logger.exception("Unexpected error in main loop")
                 awaiting_clarification = False
+                recovery = "I couldn't complete that request, sir. No action was confirmed."
+                try:
+                    splash_update("SPEAKING", recovery, "off")
+                    speak(recovery)
+                except Exception:
+                    logger.exception("Could not speak main-loop recovery message")
                 splash_update("LISTENING", "Awaiting your command, sir", "on")
     finally:
         if stt is not None:

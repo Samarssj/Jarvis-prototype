@@ -40,10 +40,17 @@ class MemoryStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text TEXT NOT NULL,
                     time TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    delivered INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT
                 )
                 """
                 )
+                reminder_columns = {row[1] for row in conn.execute("PRAGMA table_info(reminders)").fetchall()}
+                if "delivered" not in reminder_columns:
+                    conn.execute("ALTER TABLE reminders ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
+                if "delivered_at" not in reminder_columns:
+                    conn.execute("ALTER TABLE reminders ADD COLUMN delivered_at TEXT")
                 conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alarms (
@@ -83,13 +90,14 @@ class MemoryStore:
                 ).fetchall()
         return [{"role": role, "content": content} for role, content in reversed(rows)]
 
-    def add_reminder(self, text: str, when: str) -> None:
+    def add_reminder(self, text: str, when: str) -> int:
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
-                "INSERT INTO reminders(text, time, created_at) VALUES (?, ?, ?)",
+                cursor = conn.execute(
+                "INSERT INTO reminders(text, time, delivered, created_at) VALUES (?, ?, 0, ?)",
                 (text, when, datetime.now(timezone.utc).isoformat()),
                 )
+                return int(cursor.lastrowid)
 
     def list_reminders(self) -> list[dict[str, str]]:
         with self._lock:
@@ -99,12 +107,39 @@ class MemoryStore:
                 ).fetchall()
         return [{"text": text, "time": when} for text, when in rows]
 
-    def add_alarm(self, text: str, when: str) -> None:
+    def add_alarm(self, text: str, when: str) -> int:
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                "INSERT INTO alarms(text, time, triggered, created_at) VALUES (?, ?, 0, ?)",
+                (text, when, datetime.now(timezone.utc).isoformat()),
+                )
+                return int(cursor.lastrowid)
+
+    def get_due_reminders(self, now_iso: str) -> list[dict[str, Any]]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, text, time
+                    FROM reminders
+                    WHERE delivered = 0 AND time <= ?
+                    ORDER BY time ASC
+                    """,
+                    (now_iso,),
+                ).fetchall()
+        return [{"id": reminder_id, "text": text, "time": when} for reminder_id, text, when in rows]
+
+    def mark_reminder_delivered(self, reminder_id: int) -> None:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
-                "INSERT INTO alarms(text, time, triggered, created_at) VALUES (?, ?, 0, ?)",
-                (text, when, datetime.now(timezone.utc).isoformat()),
+                    """
+                    UPDATE reminders
+                    SET delivered = 1, delivered_at = ?
+                    WHERE id = ?
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), reminder_id),
                 )
 
     def get_due_alarms(self, now_iso: str) -> list[dict[str, Any]]:

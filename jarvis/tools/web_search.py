@@ -10,12 +10,18 @@ import requests
 
 
 def web_search(query: str) -> str:
-    """Search the web and summarize the top DuckDuckGo result."""
+    """Search DuckDuckGo and return a verified top result or an explicit error."""
+    query = query.strip()
+    if not query:
+        return "TOOL_ERROR: A search query is required."
+
     url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=15)
-    if response.status_code != 200:
-        return f"Web search failed with HTTP {response.status_code}."
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return f"TOOL_ERROR: Web search failed because {exc}."
 
     match = re.search(
         r'<a[^>]*class="result__a"[^>]*href="(?P<link>[^"]+)"[^>]*>(?P<title>.*?)</a>.*?result__snippet">(?P<snippet>.*?)</a>',
@@ -23,9 +29,11 @@ def web_search(query: str) -> str:
         re.S,
     )
     if not match:
-        return f"No results found for '{query}'."
+        return f"TOOL_ERROR: No web results found for '{query}'."
 
-    title = html.unescape(re.sub("<.*?>", "", match.group("title"))).strip()
-    snippet = html.unescape(re.sub("<.*?>", "", match.group("snippet"))).strip()
+    title = html.unescape(re.sub(r"<.*?>", "", match.group("title"))).strip()
+    snippet = html.unescape(re.sub(r"<.*?>", "", match.group("snippet"))).strip()
     link = html.unescape(match.group("link")).strip()
-    return f"{title}: {snippet} ({link})"
+    if not title or not link:
+        return f"TOOL_ERROR: The search response for '{query}' was incomplete."
+    return f"TOOL_OK: {title}: {snippet} ({link})"

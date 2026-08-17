@@ -1,4 +1,4 @@
-"""System diagnostics tools for Jarvis (CPU temp, RAM, Battery, Disk)."""
+"""System diagnostics tools."""
 
 from __future__ import annotations
 
@@ -10,89 +10,89 @@ from typing import Literal
 
 
 def _get_battery_status() -> str:
-    """Retrieve macOS battery percentage and charging state via pmset."""
     try:
         res = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, check=False)
-        stdout = res.stdout.strip()
-        lines = stdout.splitlines()
+        if res.returncode != 0:
+            return f"TOOL_ERROR: Battery command failed: {(res.stderr or '').strip() or f'exit code {res.returncode}'}."
+        lines = res.stdout.strip().splitlines()
         if len(lines) > 1:
             return lines[1].strip()
-        return stdout or "Battery status unavailable."
-    except Exception as exc:
-        return f"Battery error: {exc}"
+        return res.stdout.strip() or "TOOL_ERROR: Battery status was unavailable."
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"TOOL_ERROR: Battery status failed: {exc}."
 
 
 def _get_cpu_temp() -> str:
-    """Retrieve CPU/SOC temperature on Apple Silicon macOS using swift/clang or sysctl fallback."""
     try:
-        # Check if our compiled helper exists
         helper_path = "/Users/mac/.gemini/antigravity/scratch/get_temp"
         if os.path.exists(helper_path) and os.access(helper_path, os.X_OK):
             res = subprocess.run([helper_path], capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                return f"TOOL_ERROR: CPU temperature helper failed: {(res.stderr or '').strip() or f'exit code {res.returncode}'}."
             output = res.stdout.strip()
             if "Summary" in output:
-                summary_part = output.split("--- Summary ---")[-1].strip()
-                return summary_part
+                return output.split("--- Summary ---")[-1].strip()
             if output:
                 return output.splitlines()[-1]
 
-        # Fallback to thermal state check
         res = subprocess.run(["pmset", "-g", "therm"], capture_output=True, text=True, check=False)
-        return res.stdout.strip() or "Thermal status normal."
-    except Exception as exc:
-        return f"CPU temperature error: {exc}"
+        if res.returncode != 0:
+            return f"TOOL_ERROR: Thermal status command failed: {(res.stderr or '').strip() or f'exit code {res.returncode}'}."
+        return res.stdout.strip() or "TOOL_ERROR: Thermal status was unavailable."
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"TOOL_ERROR: CPU temperature failed: {exc}."
 
 
 def _get_ram_info() -> str:
-    """Retrieve system memory usage on macOS."""
     try:
         res = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            return f"TOOL_ERROR: Total-memory command failed: {(res.stderr or '').strip() or f'exit code {res.returncode}'}."
         total_bytes = int(res.stdout.strip())
+        if total_bytes <= 0:
+            return "TOOL_ERROR: Total memory was not reported."
         total_gb = total_bytes / (1024 ** 3)
-        
+
         vm_res = subprocess.run(["vm_stat"], capture_output=True, text=True, check=False)
-        lines = vm_res.stdout.splitlines()
+        if vm_res.returncode != 0:
+            return f"TOOL_ERROR: VM statistics command failed: {(vm_res.stderr or '').strip() or f'exit code {vm_res.returncode}'}."
         page_size = 4096
-        free_pages = 0
         active_pages = 0
-        inactive_pages = 0
         wired_pages = 0
-        for line in lines:
-            if "Pages free:" in line:
-                free_pages = int(line.split(":")[-1].strip().rstrip("."))
-            elif "Pages active:" in line:
+        for line in vm_res.stdout.splitlines():
+            if "Pages active:" in line:
                 active_pages = int(line.split(":")[-1].strip().rstrip("."))
-            elif "Pages inactive:" in line:
-                inactive_pages = int(line.split(":")[-1].strip().rstrip("."))
             elif "Pages wired down:" in line:
                 wired_pages = int(line.split(":")[-1].strip().rstrip("."))
-        
         used_gb = ((active_pages + wired_pages) * page_size) / (1024 ** 3)
         return f"RAM: {used_gb:.1f} GB used of {total_gb:.1f} GB total ({((used_gb / total_gb) * 100):.0f}% used)."
-    except Exception as exc:
-        return f"RAM info error: {exc}"
+    except (OSError, subprocess.SubprocessError, ValueError, ZeroDivisionError) as exc:
+        return f"TOOL_ERROR: RAM information failed: {exc}."
 
 
 def _get_disk_info() -> str:
-    """Retrieve main disk space usage."""
     try:
         total, used, free = shutil.disk_usage("/")
+        if total <= 0:
+            return "TOOL_ERROR: Disk capacity was not reported."
         total_gb = total / (1024 ** 3)
         used_gb = used / (1024 ** 3)
         free_gb = free / (1024 ** 3)
         return f"Disk Space: {free_gb:.1f} GB free of {total_gb:.1f} GB total ({used_gb:.1f} GB used)."
-    except Exception as exc:
-        return f"Disk info error: {exc}"
+    except OSError as exc:
+        return f"TOOL_ERROR: Disk information failed: {exc}."
 
 
 def get_system_info(category: Literal["all", "cpu", "ram", "battery", "disk"] = "all") -> str:
-    """Return diagnostic details about the computer's CPU temperature, RAM, battery, and disk."""
+    """Return verified diagnostic details or an explicit error."""
     if platform.system().lower() != "darwin":
-        return "System diagnostics are currently implemented for macOS."
+        return "TOOL_ERROR: System diagnostics are currently implemented for macOS only."
 
-    category = category.lower().strip() # type: ignore
-    results = []
+    category = category.lower().strip()  # type: ignore
+    if category not in {"all", "cpu", "ram", "battery", "disk"}:
+        return f"TOOL_ERROR: Unsupported diagnostic category '{category}'."
 
+    results: list[str] = []
     if category in ("all", "cpu"):
         results.append(f"CPU Thermal Status: {_get_cpu_temp()}")
     if category in ("all", "ram"):
@@ -102,4 +102,9 @@ def get_system_info(category: Literal["all", "cpu", "ram", "battery", "disk"] = 
     if category in ("all", "disk"):
         results.append(_get_disk_info())
 
-    return "\n".join(results)
+    output = "\n".join(results).strip()
+    if not output:
+        return "TOOL_ERROR: No diagnostic data was produced."
+    if "TOOL_ERROR:" in output:
+        return f"TOOL_ERROR: One or more diagnostic checks failed.\n{output}"
+    return f"TOOL_OK: {output}"

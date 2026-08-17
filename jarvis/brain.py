@@ -26,11 +26,22 @@ class BrainResponse:
 class Brain:
     """Gemini-backed brain with basic tool-calling support and J.A.R.V.I.S. persona."""
 
-    def __init__(self, model_name: str, api_key: str, tools: dict[str, Callable[..., str]]) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        api_key: str,
+        tools: dict[str, Callable[..., str]],
+        timeout_ms: int = 20000,
+    ) -> None:
         self.model_name = model_name
         self.tools = tools
         self.api_key = api_key
-        self.client = genai.Client(api_key=api_key) if api_key else None
+        self.timeout_ms = timeout_ms
+        self.client = (
+            genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=timeout_ms))
+            if api_key
+            else None
+        )
 
     def describe_image(self, path: Path) -> str:
         """Describe the content of an image file using the vision-capable model."""
@@ -310,14 +321,23 @@ class Brain:
     def _run_tool(self, name: str, args: dict[str, Any]) -> str:
         tool = self.tools.get(name)
         if tool is None:
-            return f"Tool {name} is not available."
+            return f"TOOL_ERROR: Tool {name} is not available."
         try:
-            return str(tool(**args))
-        except TypeError:
-            return str(tool(*args.values()))
+            try:
+                raw_result = tool(**args)
+            except TypeError:
+                # Preserve compatibility with legacy positional-only callables,
+                # while still catching errors raised by the fallback invocation.
+                raw_result = tool(*args.values())
+            if raw_result is None:
+                return f"TOOL_ERROR: Tool {name} returned no result."
+            result = str(raw_result).strip()
         except Exception as exc:  # pragma: no cover - safety net
             logger.exception("Tool %s failed", name)
-            return f"Tool {name} failed: {exc}"
+            return f"TOOL_ERROR: Tool {name} failed: {exc}"
+        if result.startswith(("TOOL_OK:", "TOOL_ERROR:", "TOOL_RESULT:")):
+            return result
+        return f"TOOL_RESULT: {result}"
 
     @staticmethod
     def _tool_result_message(name: str, result: str) -> dict[str, str]:
@@ -325,6 +345,37 @@ class Brain:
             "role": "user",
             "content": f"Tool result for {name}: {result}",
         }
+
+    @staticmethod
+    def _grounded_tool_response(tool_results: list[dict[str, Any]]) -> str:
+        """Return a safe spoken response based only on exact tool output."""
+        if not tool_results:
+            return "I don't have a tool result to report, sir."
+
+        failures = [
+            str(item["result"]).removeprefix("TOOL_ERROR:").strip()
+            for item in tool_results
+            if str(item["result"]).startswith("TOOL_ERROR:")
+        ]
+        if failures:
+            return "I couldn't complete that, sir. " + " ".join(failures)
+
+        confirmations = [
+            str(item["result"]).removeprefix("TOOL_OK:").strip()
+            for item in tool_results
+            if str(item["result"]).startswith("TOOL_OK:")
+        ]
+        observations = [
+            str(item["result"]).removeprefix("TOOL_RESULT:").strip()
+            for item in tool_results
+            if str(item["result"]).startswith("TOOL_RESULT:")
+        ]
+        parts: list[str] = []
+        if confirmations:
+            parts.append("Confirmed, sir. " + " ".join(confirmations))
+        if observations:
+            parts.append("Here is what I found, sir. " + " ".join(observations))
+        return " ".join(parts) if parts else "The tool returned no grounded content, sir."
 
     def generate(self, messages: list[dict[str, str]], facts: dict[str, str] | None = None) -> BrainResponse:
         """Generate a response and run any requested tools.
@@ -347,9 +398,13 @@ class Brain:
             "Provide concise, clear, and direct answers optimized for spoken text-to-speech output. "
             "Never use markdown formatting such as asterisks, bullet points, headers, or backticks — "
             "respond in plain spoken sentences only. "
-            "This persona is a character you're playing — never assume the real user is Tony Stark "
-            "or has any specific identity unless they've told you directly."
-        )
+                "This persona is a character you're playing — never assume the real user is Tony Stark "
+                "or has any specific identity unless they've told you directly. "
+                "Tool grounding is mandatory: when a tool is called, base any claim about that action only on "
+                "the exact tool result. A result beginning with TOOL_OK means it succeeded; TOOL_ERROR means it "
+                "failed. Never say an alarm, reminder, file operation, application launch, or other tool action "
+                "was completed when the tool result does not confirm it. If a tool fails, say so plainly."
+            )
 
         if facts:
             facts_lines = "; ".join(f"{key}: {value}" for key, value in facts.items())
@@ -387,7 +442,11 @@ class Brain:
                 raise
             tool_calls = self._extract_function_calls(response)
             if not tool_calls:
-                return BrainResponse(text=self._extract_text(response) or "I’m here, sir.", tool_calls=tool_results)
+                text = self._extract_text(response)
+                if text:
+                    return BrainResponse(text=text, tool_calls=tool_results)
+                fallback = self._grounded_tool_response(tool_results) if tool_results else "I’m here, sir."
+                return BrainResponse(text=fallback, tool_calls=tool_results)
 
             working_messages.append(
                 {
@@ -400,4 +459,9 @@ class Brain:
                 tool_results.append({"name": call["name"], "result": result, "args": call.get("args", {})})
                 working_messages.append(self._tool_result_message(call["name"], result))
 
-        return BrainResponse(text="I completed the requested tools, sir.", tool_calls=tool_results)
+            # Every tool action is acknowledged directly from its verified result.
+            # This prevents a second model turn from embellishing a success or
+            # hiding a failure, while non-tool turns still use the model normally.
+            return BrainResponse(text=self._grounded_tool_response(tool_results), tool_calls=tool_results)
+
+        return BrainResponse(text=self._grounded_tool_response(tool_results), tool_calls=tool_results)

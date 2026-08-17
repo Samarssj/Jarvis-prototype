@@ -70,7 +70,10 @@ class TextToSpeech:
             audio_path.unlink(missing_ok=True)
 
     def speak_and_play(self, text: str) -> None:
-        """Convenience helper to synthesize, play, and pause briefly."""
+        """Convenience helper to synthesize and play speech without an extra delay."""
+        started = time.perf_counter()
         audio = self.speak(text)
+        synthesized_ms = (time.perf_counter() - started) * 1000
+        playback_started = time.perf_counter()
         self.play(audio)
-        time.sleep(0.1)
+        logger.info("Speech timing: synthesis=%.0fms playback=%.0fms", synthesized_ms, (time.perf_counter() - playback_started) * 1000)

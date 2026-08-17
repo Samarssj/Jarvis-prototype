@@ -10,6 +10,8 @@ import time
 import wave
 from pathlib import Path
 
+from jarvis.splash import set_audio_level
+
 # Prevent OpenMP thread deadlocks on macOS CPU with background threads
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["CTRANSLATE2_INTER_THREADS"] = "1"
@@ -30,13 +32,23 @@ class SpeechToText:
     for a wake word) can trigger flaky hangs in PortAudio/CoreAudio on macOS.
     """
 
-    def __init__(self, model_size: str = "base", sample_rate: int = 16000) -> None:
+    def __init__(
+        self,
+        model_size: str = "tiny.en",
+        sample_rate: int = 16000,
+        silence_limit: float = 1.0,
+        no_speech_timeout: float = 2.0,
+    ) -> None:
         self.sample_rate = sample_rate
+        self.silence_limit = silence_limit
+        self.no_speech_timeout = no_speech_timeout
         # Single CPU thread avoids macOS OpenMP thread locks
         self.model = WhisperModel(model_size, device="cpu", compute_type="float32", cpu_threads=1)
 
         self._stream_lock = threading.Lock()
         self.stream: sd.InputStream | None = None
+        self._last_audio_publish = 0.0
+        self._smoothed_audio_level = 0.0
         self._open_stream()
 
     def _open_stream(self) -> None:
@@ -56,6 +68,10 @@ class SpeechToText:
                     logger.exception("Error closing microphone stream")
                 finally:
                     self.stream = None
+                    try:
+                        set_audio_level(0.0)
+                    except Exception:
+                        logger.debug("Unable to reset microphone level on close", exc_info=True)
                     logger.info("Microphone stream closed")
 
     def _ensure_stream(self) -> None:
@@ -63,19 +79,37 @@ class SpeechToText:
         if self.stream is None:
             self._open_stream()
 
+    def _publish_audio_level(self, rms: float) -> None:
+        """Send a smoothed, normalized microphone level to the local HUD."""
+        now = time.monotonic()
+        if now - self._last_audio_publish < 0.08:
+            return
+        # Speech energy is typically concentrated below 0.2 RMS; compress the
+        # range so quiet speech still produces visible motion without clipping.
+        normalized = min(1.0, max(0.0, rms / 0.20))
+        self._smoothed_audio_level = self._smoothed_audio_level * 0.55 + normalized * 0.45
+        self._last_audio_publish = now
+        try:
+            set_audio_level(self._smoothed_audio_level)
+        except Exception:
+            logger.debug("Unable to publish microphone level", exc_info=True)
+
     def record_audio_vad(
         self,
         max_seconds: float = 12.0,
-        silence_limit: float = 2.1,
+        silence_limit: float | None = None,
         energy_threshold: float = 0.025,
+        no_speech_timeout: float | None = None,
     ) -> Path:
         """Record audio dynamically with Voice Activity Detection (VAD).
 
         Stops automatically when silence is detected post-speech. Reads from
         the persistent stream rather than opening a new one each call.
         """
-        chunk_duration = 0.05  # 50ms chunk
+        chunk_duration = 0.04  # 40ms chunk for responsive VAD
         chunk_size = int(self.sample_rate * chunk_duration)
+        silence_limit = self.silence_limit if silence_limit is None else silence_limit
+        no_speech_timeout = self.no_speech_timeout if no_speech_timeout is None else no_speech_timeout
         frames: list[np.ndarray] = []
 
         has_speech_started = False
@@ -96,13 +130,14 @@ class SpeechToText:
                     frames.append(flat_chunk)
 
                     rms = float(np.sqrt(np.mean(flat_chunk ** 2)))
+                    self._publish_audio_level(rms)
 
                     if not has_speech_started:
                         if rms > energy_threshold:
                             has_speech_started = True
                             logger.info("Speech detected (RMS: %.4f)! Recording...", rms)
-                        elif (time.time() - start_time) > 4.0:
-                            logger.info("No speech detected after 4s.")
+                        elif (time.time() - start_time) > no_speech_timeout:
+                            logger.info("No speech detected after %.1fs.", no_speech_timeout)
                             break
                     else:
                         if rms < energy_threshold:
@@ -127,7 +162,16 @@ class SpeechToText:
                 except Exception:
                     pass
                 self.stream = None
+                try:
+                    set_audio_level(0.0)
+                except Exception:
+                    logger.debug("Unable to reset microphone level after stream error", exc_info=True)
                 return self.record_audio_fixed(seconds=int(max_seconds))
+
+        try:
+            set_audio_level(0.0)
+        except Exception:
+            logger.debug("Unable to reset microphone level", exc_info=True)
 
         if frames:
             audio_data = np.concatenate(frames, axis=0)
@@ -161,6 +205,8 @@ class SpeechToText:
             dtype="float32",
         )
         sd.wait()
+        rms = float(np.sqrt(np.mean(audio.squeeze() ** 2)))
+        self._publish_audio_level(rms)
         pcm = np.clip(audio.squeeze(), -1.0, 1.0)
         int16 = (pcm * 32767).astype(np.int16)
 
@@ -185,9 +231,15 @@ class SpeechToText:
         return text
 
     def listen_and_transcribe(self, seconds: int = 11) -> str:
-        """Record audio and return the transcribed text."""
+        """Record audio and return the transcribed text with stage timing logs."""
+        started = time.perf_counter()
         wav_path = self.record_audio(seconds=seconds)
+        recorded_ms = (time.perf_counter() - started) * 1000
         try:
-            return self.transcribe_file(wav_path)
+            transcribe_started = time.perf_counter()
+            text = self.transcribe_file(wav_path)
+            transcribed_ms = (time.perf_counter() - transcribe_started) * 1000
+            logger.info("Voice pipeline timing: capture=%.0fms transcription=%.0fms", recorded_ms, transcribed_ms)
+            return text
         finally:
             wav_path.unlink(missing_ok=True)
