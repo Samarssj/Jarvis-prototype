@@ -190,8 +190,8 @@ Then restart Jarvis from that project directory. The loader now searches the pro
 | `JARVIS_MODEL_TIMEOUT_MS` | `20000` | Maximum model request timeout. |
 | `JARVIS_STT_MODEL` | `tiny.en` | faster-whisper model; `base.en` trades latency for accuracy. |
 | `JARVIS_SAMPLE_RATE` | `16000` | Microphone sample rate in Hz. |
-| `JARVIS_VAD_SILENCE_LIMIT` | `1.0` | Seconds of silence before command capture ends. |
-| `JARVIS_VAD_NO_SPEECH_TIMEOUT` | `2.0` | Initial wait for speech after Jarvis begins listening. |
+| `JARVIS_VAD_SILENCE_LIMIT` | `2.1` | Seconds of silence before command capture ends. |
+| `JARVIS_VAD_NO_SPEECH_TIMEOUT` | `4.0` | Initial wait for speech after Jarvis begins listening. |
 | `JARVIS_RECORD_SECONDS` | `8` | Maximum command recording duration. |
 | `JARVIS_TTS_VOICE` | `en-GB-RyanNeural` | Edge TTS voice. |
 | `JARVIS_TTS_RATE` | `+0%` | Speech rate. |

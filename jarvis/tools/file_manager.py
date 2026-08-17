@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
+import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -17,24 +20,149 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"}
 MAX_RESULTS = 5
 MAX_TEXT_CHARS = 4000
 
+# Common suffixes are removed from the primary comparison form so a request for
+# "Samar ATS Resume" can match both Samar_ATS_Resume.pdf.pdf and
+# Samar_ATS_Resume.pdf-3.pdf. The full filename remains a secondary form, so a
+# request that explicitly includes an extension still works.
+KNOWN_FILE_EXTENSIONS = {
+    ".csv",
+    ".css",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".heic",
+    ".html",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".log",
+    ".md",
+    ".pdf",
+    ".png",
+    ".py",
+    ".txt",
+    ".webp",
+}
+_FILENAME_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+_VOWELS = re.compile(r"[aeiouy]+")
+
+
+def _normalize_filename_text(value: str) -> str:
+    """Normalize punctuation, separators, accents, and case for filename input."""
+    ascii_value = (
+        unicodedata.normalize("NFKD", value)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    return _FILENAME_NON_ALNUM.sub(" ", ascii_value.casefold()).strip()
+
+
+def _filename_tokens(value: str) -> list[str]:
+    normalized = _normalize_filename_text(value)
+    return normalized.split() if normalized else []
+
+
+def _phonetic_token_key(token: str) -> str:
+    """Create a conservative speech-oriented key for one filename token.
+
+    Speech recognition often changes vowels and duplicates consonants. Collapsing
+    repeated letters and vowel runs makes variants such as "summer" and
+    "samar" comparable, while the matcher still requires multiple surrounding
+    tokens or a strong overall filename score before accepting a result.
+    """
+    collapsed = re.sub(r"(.)\1+", r"\1", token)
+    return _VOWELS.sub("a", collapsed)
+
+
+def _token_similarity(query_token: str, candidate_token: str) -> float:
+    if query_token == candidate_token:
+        return 1.0
+    if (
+        len(re.sub(r"[aeiouy]", "", query_token)) >= 2
+        and _phonetic_token_key(query_token) == _phonetic_token_key(candidate_token)
+    ):
+        return 0.94
+    return difflib.SequenceMatcher(None, query_token, candidate_token).ratio()
+
+
+def _strip_known_extensions(filename: str) -> str:
+    """Return a filename with one or more known extensions removed."""
+    value = filename
+    while Path(value).suffix.casefold() in KNOWN_FILE_EXTENSIONS:
+        value = Path(value).stem
+    return value
+
+
+def _candidate_name_forms(path: Path) -> tuple[str, ...]:
+    """Return comparison forms that cover base names, suffixes, and full names."""
+    base = _strip_known_extensions(path.name)
+    forms = (base, path.stem, path.name)
+    return tuple(dict.fromkeys(_normalize_filename_text(form) for form in forms if form))
+
+
+def _name_similarity(query: str, candidate: str) -> float:
+    """Score literal and speech-recognition-friendly similarity from 0.0 to 1.0."""
+    query_normalized = _normalize_filename_text(query)
+    candidate_normalized = _normalize_filename_text(candidate)
+    if not query_normalized or not candidate_normalized:
+        return 0.0
+    if query_normalized in candidate_normalized:
+        return 1.0
+
+    query_compact = query_normalized.replace(" ", "")
+    candidate_compact = candidate_normalized.replace(" ", "")
+    compact_score = difflib.SequenceMatcher(None, query_compact, candidate_compact).ratio()
+
+    query_tokens = query_normalized.split()
+    candidate_tokens = candidate_normalized.split()
+    token_scores = [
+        max(_token_similarity(query_token, candidate_token) for candidate_token in candidate_tokens)
+        for query_token in query_tokens
+    ]
+    token_coverage = sum(token_scores) / len(token_scores)
+    if len(query_tokens) == 1:
+        # A single spoken token may stand for one token in a longer filename;
+        # do not penalize it merely because the filename has other words.
+        return max(compact_score, token_coverage)
+
+    order_score = difflib.SequenceMatcher(
+        None, " ".join(query_tokens), " ".join(candidate_tokens)
+    ).ratio()
+    return max(compact_score, token_coverage * 0.75 + order_score * 0.25)
+
+
+def _minimum_match_score(query: str) -> float:
+    """Use a stricter threshold for one-word fuzzy requests."""
+    return 0.86 if len(_filename_tokens(query)) == 1 else 0.80
+
 
 def _search_folders(name: str) -> list[Path]:
-    """Case-insensitive search in safe roots only."""
-    name = name.strip().lower()
-    matches: list[Path] = []
+    """Search safe roots using literal, separator-insensitive, and fuzzy matching."""
+    query = _normalize_filename_text(name)
+    if not query:
+        return []
+
+    scored_matches: list[tuple[float, Path]] = []
+    minimum_score = _minimum_match_score(query)
     for root in SAFE_ROOTS:
         if not root.exists():
             continue
         try:
             for path in root.rglob("*"):
-                if path.is_file() and name in path.name.lower():
-                    matches.append(path)
-                    if len(matches) >= MAX_RESULTS * 3:
-                        break
+                if not path.is_file():
+                    continue
+                score = max(
+                    (_name_similarity(query, form) for form in _candidate_name_forms(path)),
+                    default=0.0,
+                )
+                if score >= minimum_score:
+                    scored_matches.append((score, path))
         except OSError:
             logger.warning("Could not fully search %s", root, exc_info=True)
-    matches.sort(key=lambda p: len(p.name))
-    return matches[:MAX_RESULTS]
+
+    scored_matches.sort(key=lambda item: (-item[0], len(item[1].name), item[1].name.casefold()))
+    return [path for _, path in scored_matches[:MAX_RESULTS]]
 
 
 def _clarification_prompt(name: str, matches: list[Path], action: str) -> str:
@@ -48,7 +176,12 @@ def _resolve_match(name: str, action: str) -> tuple[Path | None, str | None]:
         return None, f"No file matching '{name}' was found in Documents, Desktop, or Downloads."
     if len(matches) == 1:
         return matches[0], None
-    exact = [p for p in matches if p.stem.lower() == name.strip().lower()]
+    query = _normalize_filename_text(name)
+    exact = [
+        p
+        for p in matches
+        if any(_normalize_filename_text(form) == query for form in _candidate_name_forms(p))
+    ]
     if len(exact) == 1:
         return exact[0], None
     return None, _clarification_prompt(name, matches, action)
