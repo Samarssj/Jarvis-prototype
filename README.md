@@ -138,6 +138,18 @@ source .venv/bin/activate
 
 On Windows PowerShell, activate with `.venv\\Scripts\\Activate.ps1`. The primary runtime and media integrations are designed for macOS.
 
+### Keep GitHub commit attribution canonical
+
+If you contribute from a local checkout, configure the repository with your authenticated GitHub account before creating commits:
+
+```bash
+./scripts/setup_git_identity.sh
+```
+
+The setup derives GitHub's stable ID-based `noreply` address and enables the repository's pre-commit guard. This prevents a numeric account ID from being serialized in scientific notation, which can make GitHub display separate author and committer icons for the same person. The committed `.mailmap` normalizes the affected historical address without rewriting commit history, while the pre-commit guard blocks this malformed address before a new commit is created.
+
+This is an attribution safeguard only; it does not change Jarvis's runtime, dependencies, voice loop, HUD, tools, database, or existing application workflows.
+
 ### 2. Install dependencies
 
 ```bash

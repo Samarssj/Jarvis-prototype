@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+email="$(git config --get user.email || true)"
+
+# A numeric GitHub ID must not be converted to scientific notation. Keep this
+# guard narrow so normal verified emails and legacy username-based addresses
+# remain valid for contributors.
+if [[ "$email" =~ ^[0-9]+\.[0-9]+e[+-][0-9]+\+[^@]+@users\.noreply\.github\.com$ ]]; then
+  cat >&2 <<'EOF'
+Commit blocked: Git is configured with a scientific-notation GitHub no-reply address.
+Run ./scripts/setup_git_identity.sh, then retry the commit.
+EOF
+  exit 1
+fi
