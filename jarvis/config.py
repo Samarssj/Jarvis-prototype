@@ -19,6 +19,24 @@ for _env_path in dict.fromkeys(_ENV_CANDIDATES):
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
+def _fetch_latest_normal_model(api_key: str) -> str:
+    normal_model = "gemini-flash-latest"
+    if not api_key:
+        return normal_model
+    try:
+        import urllib.request
+        import json
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            for m in data.get("models", []):
+                if "generateContent" in m.get("supportedGenerationMethods", []) and "flash-latest" in m["name"]:
+                    normal_model = m["name"].split("/")[-1]
+    except Exception:
+        pass
+    return normal_model
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -30,7 +48,10 @@ class Settings:
     gemini_api_key: str = _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")
     openweather_api_key: str = _env("OPENWEATHER_API_KEY")
     wake_word: str = _env("JARVIS_WAKE_WORD", "jarvis")
-    model: str = _env("JARVIS_MODEL", "gemini-flash-latest")
+    
+    primary_model: str = _fetch_latest_normal_model(gemini_api_key)
+    fallback_model: str = ""
+    model: str = _env("JARVIS_MODEL", primary_model)
     model_timeout_ms: int = int(_env("JARVIS_MODEL_TIMEOUT_MS", "20000"))
     tts_voice: str = _env("JARVIS_TTS_VOICE", "en-GB-RyanNeural")
     tts_rate: str = _env("JARVIS_TTS_RATE", "+0%")

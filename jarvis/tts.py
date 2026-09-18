@@ -77,3 +77,93 @@ class TextToSpeech:
         playback_started = time.perf_counter()
         self.play(audio)
         logger.info("Speech timing: synthesis=%.0fms playback=%.0fms", synthesized_ms, (time.perf_counter() - playback_started) * 1000)
+
+
+import queue
+import threading
+
+class TTSWorker:
+    """Asynchronous worker for synthesizing and playing TTS chunks."""
+    
+    def __init__(self, tts: TextToSpeech):
+        self.tts = tts
+        self._text_queue = queue.Queue()
+        self._audio_queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._current_process = None
+        
+        self._synthesis_thread = threading.Thread(target=self._synthesize_worker, daemon=True)
+        self._playback_thread = threading.Thread(target=self._playback_worker, daemon=True)
+        self._synthesis_thread.start()
+        self._playback_thread.start()
+
+    def enqueue_text(self, text: str):
+        """Add a text chunk to be synthesized and played."""
+        if text and text.strip():
+            self._text_queue.put(text)
+
+    def interrupt(self):
+        """Interrupt current playback and clear queues without stopping threads."""
+        if self._current_process:
+            try:
+                self._current_process.terminate()
+            except Exception:
+                pass
+        
+        while not self._text_queue.empty():
+            try: 
+                self._text_queue.get_nowait()
+                self._text_queue.task_done()
+            except queue.Empty: break
+            
+        while not self._audio_queue.empty():
+            try: 
+                self._audio_queue.get_nowait()
+                self._audio_queue.task_done()
+            except queue.Empty: break
+
+    def stop(self):
+        """Completely stop threads."""
+        self.interrupt()
+        self._stop_event.set()
+
+    def wait_until_done(self):
+        """Block until all queued text is synthesized and played."""
+        self._text_queue.join()
+        self._audio_queue.join()
+
+    def _synthesize_worker(self):
+        while not self._stop_event.is_set():
+            try:
+                text = self._text_queue.get(timeout=0.1)
+                if not text.strip():
+                    self._text_queue.task_done()
+                    continue
+                audio_path = self.tts.speak(text)
+                self._audio_queue.put(audio_path)
+                self._text_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"TTS Synthesis error: {e}")
+                self._text_queue.task_done()
+
+    def _playback_worker(self):
+        while not self._stop_event.is_set():
+            try:
+                audio_path = self._audio_queue.get(timeout=0.1)
+                try:
+                    if sys.platform == "darwin":
+                        self._current_process = subprocess.Popen(["afplay", "-v", "2.0", str(audio_path)])
+                        self._current_process.wait()
+                        self._current_process = None
+                    else:
+                        self.tts.play(audio_path)
+                finally:
+                    audio_path.unlink(missing_ok=True)
+                self._audio_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"TTS Playback error: {e}")
+                self._audio_queue.task_done()

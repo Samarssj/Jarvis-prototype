@@ -32,8 +32,10 @@ class Brain:
         api_key: str,
         tools: dict[str, Callable[..., str]],
         timeout_ms: int = 20000,
+        fallback_model_name: str | None = None,
     ) -> None:
         self.model_name = model_name
+        self.fallback_model_name = fallback_model_name
         self.tools = tools
         self.api_key = api_key
         self.timeout_ms = timeout_ms
@@ -42,6 +44,45 @@ class Brain:
             if api_key
             else None
         )
+
+    def _candidate_models(self) -> list[str]:
+        models = [self.model_name]
+        if self.fallback_model_name and self.fallback_model_name not in models:
+            models.append(self.fallback_model_name)
+        return models
+
+    def _generate_content(self, *, contents: list[dict[str, Any]], system_prompt: str, tools: list[types.Tool]) -> Any:
+        """Try the configured primary model first, then a fallback model on overload or availability errors."""
+        assert self.client is not None
+        last_error: Exception | None = None
+        for model_name in self._candidate_models():
+            try:
+                return self.client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        tools=tools,
+                        temperature=0.4,
+                    ),
+                )
+            except ClientError as exc:
+                message = str(exc)
+                last_error = exc
+                if "429" in message or "Too Many Requests" in message or "404" in message or "not found" in message.lower():
+                    logger.warning("Gemini model %s unavailable or overloaded; trying fallback if available.", model_name)
+                    continue
+                raise
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                if any(token in message for token in ("429", "too many requests", "rate", "quota", "unavailable", "not found")):
+                    logger.warning("Gemini model %s failed (%s); trying fallback if available.", model_name, exc)
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Gemini models are configured.")
 
     def describe_image(self, path: Path) -> str:
         """Describe the content of an image file using the vision-capable model."""
@@ -57,13 +98,14 @@ class Brain:
         }
         mime_type = mime_map.get(path.suffix.lower(), "image/jpeg")
         image_bytes = path.read_bytes()
-        response = self.client.models.generate_content(
-            model=self.model_name,
+        response = self._generate_content(
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 "Describe what's in this image in two or three concise sentences, "
                 "suitable for being read aloud by a voice assistant.",
             ],
+            system_prompt="",
+            tools=[],
         )
         return self._extract_text(response) or "I couldn't make out anything specific in that image, sir."
 
@@ -292,7 +334,9 @@ class Brain:
 
     @staticmethod
     def _extract_text_from_candidate(candidate: Any) -> str:
-        parts = getattr(candidate.content, "parts", []) or []
+        content = getattr(candidate, "content", None)
+        if not content: return ""
+        parts = getattr(content, "parts", []) or []
         texts: list[str] = []
         for part in parts:
             text = getattr(part, "text", None)
@@ -302,17 +346,35 @@ class Brain:
 
     @staticmethod
     def _extract_text(response: Any) -> str:
+        text_parts = []
+        # Support for Live API chunks (LiveServerMessage -> LiveServerContent -> ModelTurn)
+        if getattr(response, "server_content", None) and getattr(response.server_content, "model_turn", None):
+            for part in getattr(response.server_content.model_turn, "parts", []) or []:
+                if getattr(part, "text", None):
+                    text_parts.append(part.text)
+        
+        # Standard REST API chunks
         for candidate in getattr(response, "candidates", []) or []:
             text = Brain._extract_text_from_candidate(candidate)
             if text:
-                return text
-        return ""
+                text_parts.append(text)
+                
+        return "\n".join(text_parts).strip()
 
     @staticmethod
     def _extract_function_calls(response: Any) -> list[dict[str, Any]]:
         calls: list[dict[str, Any]] = []
+        # Support for Live API function calls (LiveServerMessage -> LiveClientToolCall)
+        if getattr(response, "tool_call", None):
+            for call in getattr(response.tool_call, "function_calls", []) or []:
+                if getattr(call, "name", None):
+                    calls.append({"name": call.name, "args": dict(call.args or {})})
+                    
+        # Standard REST API chunks
         for candidate in getattr(response, "candidates", []) or []:
-            for part in getattr(candidate.content, "parts", []) or []:
+            content = getattr(candidate, "content", None)
+            if not content: continue
+            for part in getattr(content, "parts", []) or []:
                 call = getattr(part, "function_call", None)
                 if call:
                     calls.append({"name": call.name, "args": dict(call.args or {})})
@@ -428,22 +490,13 @@ class Brain:
 
         for _ in range(3):
             try:
-                response = self.client.models.generate_content(
-                    model=self.model_name,
+                response = self._generate_content(
                     contents=self._messages_to_contents(working_messages),
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        tools=self._tool_definitions(),
-                        temperature=0.4,
-                    ),
+                    system_prompt=system_prompt,
+                    tools=self._tool_definitions(),
                 )
             except ClientError as exc:
                 message = str(exc)
-                if "429" in message or "Too Many Requests" in message:
-                    return BrainResponse(
-                        text="Gemini is busy right now, sir. I’ll keep running locally and try again shortly.",
-                        tool_calls=tool_results,
-                    )
                 logger.warning("Gemini request failed: %s", message)
                 return BrainResponse(
                     text=(
@@ -487,4 +540,138 @@ class Brain:
             # hiding a failure, while non-tool turns still use the model normally.
             return BrainResponse(text=self._grounded_tool_response(tool_results), tool_calls=tool_results)
 
-        return BrainResponse(text=self._grounded_tool_response(tool_results), tool_calls=tool_results)
+    def _generate_content_stream(self, *, contents: list[dict[str, Any]], system_prompt: str, tools: list[types.Tool]) -> Any:
+        assert self.client is not None
+        last_error: Exception | None = None
+        for model_name in self._candidate_models():
+            try:
+                stream = self.client.models.generate_content_stream(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        tools=tools,
+                        temperature=0.4,
+                    ),
+                )
+                stream_iter = iter(stream)
+                try:
+                    first_chunk = next(stream_iter)
+                except StopIteration:
+                    return
+                
+                yield first_chunk
+                yield from stream_iter
+                return
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                if any(token in message for token in ("429", "too many requests", "rate", "quota", "unavailable", "not found", "policy", "1008", "1007")):
+                    logger.warning("Gemini model %s failed on Live API; trying fallback.", model_name)
+                    continue
+                raise
+        
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Gemini models are configured.")
+
+    def generate_stream(self, messages: list[dict[str, str]], facts: dict[str, str] | None = None):
+        """Yield generated sentences as they arrive, returning a final BrainResponse when done."""
+        if self.client is None:
+            yield "Gemini API key is missing, sir. Add GEMINI_API_KEY to the .env file in this Jarvis project and restart me."
+            return BrainResponse(text="Gemini API key is missing.", tool_calls=[])
+
+        tool_results: list[dict[str, Any]] = []
+        working_messages = list(messages)
+
+        system_prompt = (
+            "You are J.A.R.V.I.S., which stands for Just A Rather Very Intelligent System — "
+            "Tony Stark's witty, intelligent, and polite AI assistant. "
+            "Always address the user as 'sir' when appropriate. "
+            "Provide concise, clear, and direct answers optimized for spoken text-to-speech output. "
+            "Never use markdown formatting such as asterisks, bullet points, headers, or backticks — "
+            "respond in plain spoken sentences only. "
+            "This persona is a character you're playing — never assume the real user is Tony Stark "
+            "or has any specific identity unless they've told you directly. "
+            "Tool grounding is mandatory: when a tool is called, base any claim about that action only on "
+            "the exact tool result. A result beginning with TOOL_OK means it succeeded; TOOL_ERROR means it "
+            "failed. Never say an action was completed when the tool result does not confirm it."
+        )
+        if facts:
+            facts_lines = "; ".join(f"{key}: {value}" for key, value in facts.items())
+            system_prompt += f" Known facts about the user: {facts_lines}."
+        system_prompt += " Whenever the user shares something durable, call remember_fact immediately."
+
+        import re
+
+        for _ in range(3):
+            try:
+                stream = self._generate_content_stream(
+                    contents=self._messages_to_contents(working_messages),
+                    system_prompt=system_prompt,
+                    tools=self._tool_definitions(),
+                )
+            except Exception as exc:
+                logger.warning("Gemini streaming error: %s", exc)
+                msg = "Gemini is temporarily unavailable, sir."
+                yield msg
+                return BrainResponse(text=msg, tool_calls=tool_results)
+
+            text_buffer = ""
+            full_text = ""
+            tool_calls = []
+
+            try:
+                for chunk in stream:
+                    calls = self._extract_function_calls(chunk)
+                    if calls:
+                        tool_calls.extend(calls)
+                    
+                    text = self._extract_text(chunk)
+                    if text:
+                        text_buffer += text
+                        full_text += text
+                        # Split into sentences based on punctuation followed by space
+                        while True:
+                            match = re.search(r'(?<=[.!?])\s+', text_buffer)
+                            if match:
+                                boundary = match.end()
+                                sentence = text_buffer[:boundary].strip()
+                                if sentence:
+                                    yield sentence
+                                text_buffer = text_buffer[boundary:]
+                            else:
+                                break
+            except Exception as exc:
+                logger.warning("Gemini streaming iteration error: %s", exc)
+                if not full_text:
+                    msg = "Gemini is temporarily unavailable, sir."
+                    yield msg
+                    return BrainResponse(text=msg, tool_calls=tool_results)
+                # If we already yielded some text, just break and return what we have
+                pass
+
+            if text_buffer.strip():
+                yield text_buffer.strip()
+
+            if not tool_calls:
+                if not full_text and tool_results:
+                    fallback = self._grounded_tool_response(tool_results)
+                    yield fallback
+                    return BrainResponse(text=fallback, tool_calls=tool_results)
+                return BrainResponse(text=full_text, tool_calls=tool_results)
+
+            working_messages.append({"role": "assistant", "content": full_text or "Calling requested tools."})
+            for call in tool_calls:
+                result = self._run_tool(call["name"], call.get("args", {}))
+                tool_results.append({"name": call["name"], "result": result, "args": call.get("args", {})})
+                working_messages.append(self._tool_result_message(call["name"], result))
+
+            # Return grounded tool response directly without second stream loop
+            final_text = self._grounded_tool_response(tool_results)
+            yield final_text
+            return BrainResponse(text=final_text, tool_calls=tool_results)
+
+        fallback = self._grounded_tool_response(tool_results)
+        yield fallback
+        return BrainResponse(text=fallback, tool_calls=tool_results)

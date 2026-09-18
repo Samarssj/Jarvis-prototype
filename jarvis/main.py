@@ -31,7 +31,7 @@ from jarvis.tools.system_info import get_system_info
 from jarvis.tools.time_tool import get_time
 from jarvis.tools.weather import get_weather
 from jarvis.tools.web_search import web_search
-from jarvis.tts import TextToSpeech
+from jarvis.tts import TextToSpeech, TTSWorker
 from jarvis.wake import is_wake_word_match
 from jarvis.local_commands import extract_file_command, run_file_command
 
@@ -199,6 +199,7 @@ def main() -> None:
     try:
         memory = MemoryStore(settings.db_path)
         tts = TextToSpeech(voice=settings.tts_voice, rate=settings.tts_rate, pitch=settings.tts_pitch)
+        tts_worker = TTSWorker(tts)
 
         if not settings.gemini_api_key:
             missing_key_message = (
@@ -220,8 +221,9 @@ def main() -> None:
         stop_event = threading.Event()
 
         def speak(text: str) -> None:
-            with speech_lock:
-                tts.speak_and_play(text)
+            tts_worker.interrupt()
+            tts_worker.enqueue_text(text)
+            tts_worker.wait_until_done()
 
         def remember_fact(key: str, value: str) -> str:
             key = key.strip()
@@ -235,9 +237,10 @@ def main() -> None:
                 return f"TOOL_ERROR: Could not remember that fact: {exc}."
 
         brain = Brain(
-            model_name=settings.model,
+            model_name=settings.primary_model,
             api_key=settings.gemini_api_key,
             timeout_ms=settings.model_timeout_ms,
+            fallback_model_name=settings.fallback_model,
             tools={
                 "get_weather": get_weather,
                 "web_search": web_search,
@@ -271,13 +274,19 @@ def main() -> None:
             try:
                 if not awaiting_clarification:
                     wait_for_wake_word(stt, settings.wake_word)
-                    splash_update("LISTENING", "Yes, sir?", "on")
-                    speak("Yes, sir?")
+                    splash_update("LISTENING", "Yes, boss?", "on")
+                    
+                    def delayed_ack():
+                        time.sleep(0.2)
+                        speak("Yes, boss")
+                        
+                    threading.Thread(target=delayed_ack, daemon=True).start()
                 else:
                     # Jarvis just asked a question — go straight to listening,
                     # no wake word needed for this one follow-up.
                     splash_update("LISTENING", "Listening for your answer...", "on")
 
+                time.sleep(0.12)
                 user_text = stt.listen_and_transcribe(seconds=settings.record_seconds)
                 splash_update("LISTENING", "Listening...", "on")
                 if not user_text:
@@ -286,6 +295,13 @@ def main() -> None:
                     # If we were waiting on a clarification and got silence, don't
                     # loop on it forever — fall back to requiring the wake word again.
                     awaiting_clarification = False
+                    continue
+
+                # The STT might pick up our own delayed "Yes, boss" acknowledgement if it plays over the speakers
+                # while the microphone is recording. We can safely strip it out if it appears at the start.
+                import re
+                user_text = re.sub(r'^(yes,? boss[.,!?]*\s*)', '', user_text, flags=re.IGNORECASE).strip()
+                if not user_text:
                     continue
 
                 logger.info("User said: %s", user_text)
@@ -314,19 +330,38 @@ def main() -> None:
                 splash_update("THINKING", f'"{user_text}"', "off")
                 if wants_suit_assembly(user_text):
                     splash_set_animation("mark50_assembly")
+                    local_reply = "Mark 50 sequence engaged, sir."
+                    memory.add_message("assistant", local_reply)
+                    splash_update("SPEAKING", local_reply, "off")
+                    speak(local_reply)
+                    splash_update("LISTENING", "Awaiting your command, sir", "on")
+                    awaiting_clarification = False
+                    continue
                 started = time.perf_counter()
-                response = brain.generate(memory.get_recent_messages(), facts=memory.get_all_facts())
-                splash_set_latency(max(1, round((time.perf_counter() - started) * 1000)))
-                memory.add_message("assistant", response.text)
-                splash_update("SPEAKING", response.text[:60] + "..." if len(response.text) > 60 else response.text, "off")
-                speak(response.text)
-
-                awaiting_clarification = _awaits_clarification(response.text)
+                
+                full_response = ""
+                tts_worker.interrupt()
+                first_chunk = True
+                
+                for chunk in brain.generate_stream(memory.get_recent_messages(), facts=memory.get_all_facts()):
+                    if first_chunk:
+                        splash_set_latency(max(1, round((time.perf_counter() - started) * 1000)))
+                        first_chunk = False
+                    full_response += chunk + " "
+                    splash_update("SPEAKING", full_response[:60] + "..." if len(full_response) > 60 else full_response, "off")
+                    tts_worker.enqueue_text(chunk)
+                
+                tts_worker.wait_until_done()
+                full_response = full_response.strip()
+                
+                memory.add_message("assistant", full_response)
+                
+                awaiting_clarification = _awaits_clarification(full_response)
                 if awaiting_clarification:
                     logger.info("Awaiting clarification — skipping wake word on next turn.")
                 else:
                     splash_update("LISTENING", "Awaiting your command, sir", "on")
-                logger.info("Responded with: %s", response.text)
+                logger.info("Responded with: %s", full_response)
             except KeyboardInterrupt:
                 logger.info("Shutting down")
                 stop_event.set()
@@ -342,6 +377,8 @@ def main() -> None:
                     logger.exception("Could not speak main-loop recovery message")
                 splash_update("LISTENING", "Awaiting your command, sir", "on")
     finally:
+        if 'tts_worker' in locals():
+            tts_worker.stop()
         if stt is not None:
             stt.close()
         splash_update("SHUTTING DOWN", "Closing interface", "off")
