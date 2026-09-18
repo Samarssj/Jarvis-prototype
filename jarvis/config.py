@@ -50,7 +50,7 @@ class Settings:
     wake_word: str = _env("JARVIS_WAKE_WORD", "jarvis")
     
     primary_model: str = _fetch_latest_normal_model(gemini_api_key)
-    fallback_model: str = ""
+    fallback_model: str = _env("JARVIS_FALLBACK_MODEL", "gemini-2.5-flash")
     model: str = _env("JARVIS_MODEL", primary_model)
     model_timeout_ms: int = int(_env("JARVIS_MODEL_TIMEOUT_MS", "20000"))
     tts_voice: str = _env("JARVIS_TTS_VOICE", "en-GB-RyanNeural")

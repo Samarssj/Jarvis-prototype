@@ -567,7 +567,7 @@ class Brain:
                 last_error = exc
                 message = str(exc).lower()
                 if any(token in message for token in ("429", "too many requests", "rate", "quota", "unavailable", "not found", "policy", "1008", "1007")):
-                    logger.warning("Gemini model %s failed on Live API; trying fallback.", model_name)
+                    logger.warning("Gemini model %s failed; trying fallback.", model_name)
                     continue
                 raise
         
