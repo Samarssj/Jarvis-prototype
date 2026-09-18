@@ -219,3 +219,33 @@ def media_control(action: Literal["play", "pause", "next", "previous"]) -> str:
         return f"TOOL_OK: {output}"
     except (OSError, subprocess.SubprocessError) as exc:
         return f"TOOL_ERROR: Failed to send media {action}: {exc}."
+
+def system_control(action: Literal["volume_up", "volume_down", "mute", "brightness_up", "brightness_down", "lock"]) -> str:
+    """Adjust system volume, brightness, or lock the Mac."""
+    if platform.system().lower() != "darwin":
+        return "TOOL_ERROR: System controls are only implemented for macOS."
+
+    script = None
+    if action == "volume_up":
+        script = 'tell application "System Events" to repeat 2 times\n key code 72\n end repeat'
+    elif action == "volume_down":
+        script = 'tell application "System Events" to repeat 2 times\n key code 73\n end repeat'
+    elif action == "mute":
+        script = 'tell application "System Events" to key code 74'
+    elif action == "brightness_up":
+        script = 'tell application "System Events" to repeat 2 times\n key code 144\n end repeat'
+    elif action == "brightness_down":
+        script = 'tell application "System Events" to repeat 2 times\n key code 145\n end repeat'
+    elif action == "lock":
+        script = 'tell application "System Events" to keystroke "q" using {command down, control down}'
+    
+    if script:
+        try:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return f"TOOL_OK: Executed {action}."
+            return f"TOOL_ERROR: Failed to execute {action}: {result.stderr.strip()}"
+        except Exception as e:
+            return f"TOOL_ERROR: {e}"
+    
+    return f"TOOL_ERROR: Unsupported action {action}."

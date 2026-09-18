@@ -23,7 +23,7 @@ from jarvis.memory import MemoryStore
 from jarvis.splash import get_running_port, set_state
 from jarvis.stt import SpeechToText
 from jarvis.tools.alarm import set_alarm
-from jarvis.tools.app_control import media_control, open_application, play_media, power_control
+from jarvis.tools.app_control import media_control, open_application, play_media, power_control, system_control
 from jarvis.tools.browser import open_website, play_youtube
 from jarvis.tools.file_manager import describe_file, find_file, open_file
 from jarvis.tools.reminder import set_reminder
@@ -248,6 +248,7 @@ def main() -> None:
                 "play_media": play_media,
                 "media_control": media_control,
                 "power_control": power_control,
+                "system_control": system_control,
                 "get_system_info": get_system_info,
                 "set_reminder": lambda text, time: set_reminder(text, time, memory),
                 "set_alarm": lambda text, time: set_alarm(text, time, memory),
