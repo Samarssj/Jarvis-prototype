@@ -249,3 +249,41 @@ def system_control(action: Literal["volume_up", "volume_down", "mute", "brightne
             return f"TOOL_ERROR: {e}"
     
     return f"TOOL_ERROR: Unsupported action {action}."
+
+def facetime_call(contact_name: str, audio_only: bool = False) -> str:
+    """Call a contact on FaceTime by searching the macOS Contacts app."""
+    if platform.system().lower() != "darwin":
+        return "TOOL_ERROR: FaceTime is only supported on macOS."
+
+    contact_name = contact_name.strip()
+    if not contact_name:
+        return "TOOL_ERROR: Please specify a contact name."
+
+    applescript = f'''
+    tell application "Contacts"
+        set match to people whose name contains "{_escape_applescript_text(contact_name)}"
+        if (count of match) > 0 then
+            set thePerson to item 1 of match
+            if (count of emails of thePerson) > 0 then
+                return value of item 1 of emails of thePerson
+            else if (count of phones of thePerson) > 0 then
+                return value of item 1 of phones of thePerson
+            end if
+        end if
+        return "NOT_FOUND"
+    end tell
+    '''
+    try:
+        result = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True, check=False)
+        output = result.stdout.strip()
+        if result.returncode != 0:
+            return f"TOOL_ERROR: Failed to query Contacts: {result.stderr.strip()}"
+        if output == "NOT_FOUND" or not output:
+            return f"TOOL_ERROR: Could not find any email or phone number for '{contact_name}' in your Contacts."
+        
+        contact_id = output.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        scheme = "facetime-audio" if audio_only else "facetime"
+        subprocess.Popen(["open", f"{scheme}://{contact_id}"])
+        return f"TOOL_OK: Initiating FaceTime call to {contact_name}."
+    except Exception as e:
+        return f"TOOL_ERROR: {e}"
