@@ -63,24 +63,24 @@ HTML = """<!doctype html>
       background-image: linear-gradient(rgba(119,245,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(119,245,255,.035) 1px, transparent 1px);
       background-size: 42px 42px; mask-image: radial-gradient(circle, black 15%, transparent 75%);
     }
-    .hud { position: relative; width: min(96vw, 1240px); height: min(94vh, 860px); min-height: 560px; }
-    .orbital-stage { position: absolute; left: 50%; top: 50%; width: min(76vmin, 700px); aspect-ratio: 1; transform: translate(-50%, -50%); }
-    .halo, .ring, .arc, .ticks, .scan, .orbit, .core { position: absolute; border-radius: 50%; }
+    .hud { position: relative; width: min(96vw, 1240px); height: min(94vh, 860px); min-height: 560px; perspective: 1200px; transform-style: preserve-3d; }
+    .orbital-stage { position: absolute; left: 50%; top: 50%; width: min(76vmin, 700px); aspect-ratio: 1; transform: translate(-50%, -50%) rotateX(55deg) rotateZ(-30deg); transform-style: preserve-3d; animation: hologram-hover 12s ease-in-out infinite; }
+    .halo, .ring, .arc, .ticks, .scan, .orbit, .core { position: absolute; border-radius: 50%; transform-style: preserve-3d; transform: translateZ(var(--z, 0px)); }
     .halo { inset: 5%; background: radial-gradient(circle, rgba(84,223,255,.11), rgba(3,17,29,.18) 42%, transparent 70%); filter: blur(16px); animation: breathe 5.2s ease-in-out infinite; }
     .ring { inset: 11%; border: 1px solid var(--line); box-shadow: 0 0 28px rgba(35,141,255,.08), inset 0 0 22px rgba(103,233,255,.05); }
-    .ring.one { animation: rotate 22s linear infinite; }
-    .ring.two { inset: 19%; border-color: rgba(35,141,255,.36); border-style: dashed; animation: rotate-reverse 32s linear infinite; }
-    .ring.three { inset: 29%; border: 1px solid rgba(103,233,255,.28); animation: rotate 16s linear infinite; }
-    .ring.four { inset: 40%; border-color: rgba(103,233,255,.12); animation: breathe 4.2s ease-in-out infinite; }
-    .arc { inset: 6%; border: 2px solid transparent; border-top-color: var(--cyan); border-left-color: rgba(103,233,255,.24); transform: rotate(-28deg); filter: drop-shadow(0 0 6px var(--cyan)); animation: rotate 10s linear infinite; }
-    .arc.two { inset: 24%; border-width: 2px; border-right-color: var(--blue); border-bottom-color: rgba(35,141,255,.16); transform: rotate(140deg); animation-duration: 7s; animation-direction: reverse; }
+    .ring.one { animation: rotate 22s linear infinite; --z: 40px; }
+    .ring.two { inset: 19%; border-color: rgba(35,141,255,.36); border-style: dashed; animation: rotate-reverse 32s linear infinite; --z: 20px; }
+    .ring.three { inset: 29%; border: 1px solid rgba(103,233,255,.28); animation: rotate 16s linear infinite; --z: -15px; }
+    .ring.four { inset: 40%; border-color: rgba(103,233,255,.12); animation: breathe 4.2s ease-in-out infinite; --z: -35px; }
+    .arc { inset: 6%; border: 2px solid transparent; border-top-color: var(--cyan); border-left-color: rgba(103,233,255,.24); filter: drop-shadow(0 0 6px var(--cyan)); animation: rotate 10s linear infinite; --z: 70px; }
+    .arc.two { inset: 24%; border-width: 2px; border-right-color: var(--blue); border-bottom-color: rgba(35,141,255,.16); animation-duration: 7s; animation-direction: reverse; --z: 90px; }
     .ticks { inset: 2%; background: repeating-conic-gradient(from 0deg, rgba(103,233,255,.52) 0 1deg, transparent 1deg 8deg); mask: radial-gradient(circle, transparent 0 72%, black 72.5% 73.2%, transparent 73.6%); opacity: .5; animation: rotate-reverse 40s linear infinite; }
     .scan { inset: 6%; background: conic-gradient(from 0deg, transparent 0 76%, rgba(103,233,255,.12) 79%, transparent 84% 100%); mix-blend-mode: screen; filter: blur(.4px); animation: rotate 5.8s linear infinite; }
     .orbit { inset: 12%; animation: rotate 16s linear infinite; }
     .orbit::before, .orbit::after { content: ""; position: absolute; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 10px 3px var(--cyan-soft); }
     .orbit::before { top: -4px; left: 50%; } .orbit::after { bottom: 14%; right: -4px; background: var(--blue); box-shadow: 0 0 14px 4px rgba(35,141,255,.45); }
-    .core { inset: 16%; border-radius: 50%; display: grid; place-items: center; background: radial-gradient(circle at 50% 45%, rgba(5,13,20,.99) 0%, rgba(2,6,10,.997) 62%, rgba(1,2,4,1) 100%); box-shadow: inset 0 0 8px rgba(79,232,255,.02), 0 0 12px rgba(26,168,255,.025); overflow: hidden; }
-    .core::before { content: ""; position: absolute; inset: 4%; border-radius: 50%; border: 1px solid rgba(103,233,255,.06); box-shadow: inset 0 0 6px rgba(103,233,255,.015); animation: pulse 6.2s ease-in-out infinite; }
+    .core { inset: 16%; border-radius: 50%; display: grid; place-items: center; background: radial-gradient(circle at 50% 45%, rgba(5,13,20,.99) 0%, rgba(2,6,10,.997) 62%, rgba(1,2,4,1) 100%); box-shadow: inset 0 0 8px rgba(79,232,255,.02), 0 0 12px rgba(26,168,255,.025); overflow: visible; transform: translateZ(35px) rotateZ(30deg) rotateX(-55deg) scale(1.3); }
+    .core::before { content: ""; position: absolute; inset: 4%; border-radius: 50%; border: 1px solid rgba(103,233,255,.12); box-shadow: 0 0 32px rgba(103,233,255,.15), inset 0 0 16px rgba(103,233,255,.05); animation: pulse 6.2s ease-in-out infinite; }
     .core::after { content: ""; position: absolute; inset: 11%; border-radius: 50%; border: 1px solid rgba(103,233,255,.03); }
     .core-image { position: absolute; inset: 3%; width: 94%; height: 94%; object-fit: contain; filter: drop-shadow(0 0 2px rgba(103,233,255,.12)); }
     .reactor { position: relative; width: 100%; aspect-ratio: 1; border-radius: 50%; background:
@@ -110,7 +110,7 @@ HTML = """<!doctype html>
     .corner.bl { left: 0; bottom: 0; border-left: 1px solid; border-bottom: 1px solid; } .corner.br { right: 0; bottom: 0; border-right: 1px solid; border-bottom: 1px solid; }
     .panel { position: absolute; width: 220px; padding: 16px 17px; border: 1px solid var(--line); background: linear-gradient(135deg, rgba(9,34,51,.78), rgba(2,10,18,.42)); box-shadow: 0 12px 40px rgba(0,0,0,.24), inset 0 0 30px rgba(119,245,255,.035); backdrop-filter: blur(12px); }
     .panel::before { content: ""; position: absolute; left: 0; top: 0; width: 34px; height: 2px; background: var(--cyan); box-shadow: 0 0 14px var(--cyan); }
-    .panel.left { left: 2%; top: 16%; width: 310px; } .panel.right { right: 3%; top: 31%; }
+    .panel.left { left: 2%; top: 16%; width: 310px; transform: rotateY(18deg) translateZ(40px); } .panel.right { right: 3%; top: 31%; transform: rotateY(-18deg) translateZ(40px); }
     .panel.left .metric { font-size: 12px; }
     .panel.left .metric strong { font-size: 14px; }
     .panel.left .stack { margin-top: 14px; display: grid; gap: 10px; }
@@ -249,8 +249,9 @@ HTML = """<!doctype html>
     body.thinking { --cyan: var(--violet); --cyan-soft: rgba(178,119,255,.55); }
     body.speaking { --cyan: var(--amber); --cyan-soft: rgba(255,211,107,.55); }
     body.thinking .scan { animation-duration: 1.05s; } body.speaking .reactor { animation-duration: 1.1s; }
-    @keyframes rotate { to { transform: rotate(360deg); } } @keyframes rotate-reverse { to { transform: rotate(-360deg); } }
-    @keyframes breathe { 0%,100% { opacity: .55; transform: scale(.985); } 50% { opacity: 1; transform: scale(1.015); } }
+    @keyframes hologram-hover { 0%,100% { transform: translate(-50%, -50%) rotateX(55deg) rotateZ(-30deg) translateZ(0px); } 50% { transform: translate(-50%, -50%) rotateX(59deg) rotateZ(-26deg) translateZ(25px); } }
+    @keyframes rotate { from { transform: translateZ(var(--z, 0px)) rotate(0deg); } to { transform: translateZ(var(--z, 0px)) rotate(360deg); } } @keyframes rotate-reverse { from { transform: translateZ(var(--z, 0px)) rotate(0deg); } to { transform: translateZ(var(--z, 0px)) rotate(-360deg); } }
+    @keyframes breathe { 0%,100% { opacity: .55; transform: translateZ(var(--z, 0px)) scale(.985); } 50% { opacity: 1; transform: translateZ(var(--z, 0px)) scale(1.015); } }
     @keyframes reactor-pulse { 0%,100% { transform: scale(.92); opacity: .76; } 50% { transform: scale(1.07); opacity: 1; } }
     @keyframes reactor-core-spin { to { transform: rotate(360deg); } }
     @keyframes blink { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
